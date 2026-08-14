@@ -1,0 +1,15 @@
+[package]
+name = "ahp-xdp"
+description = "AF_XDP zero-copy transport for Favonius — bypasses kernel network stack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[example]]
+name = "bench_xdp"
+path = "src/bench.rs"
+
+[dependencies]
+libc = "0.2"
+thiserror = { workspace = true }
+tracing = { workspace = true }

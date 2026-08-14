@@ -1,0 +1,9 @@
+date,arm,build,concurrency,size_mib,run,seconds,mib_s,verified
+2026-08-14,4concurrent,new,4,512,1,5.250,390.1,ok
+2026-08-14,4concurrent,old,4,512,1,7.133,287.1,ok
+2026-08-14,4concurrent,old,4,512,2,6.969,293.9,ok
+2026-08-14,4concurrent,new,4,512,2,6.104,335.5,ok
+2026-08-14,4concurrent,new,4,512,3,5.506,372.0,ok
+2026-08-14,4concurrent,old,4,512,3,7.364,278.1,ok
+2026-08-14,4concurrent,old,4,512,4,7.535,271.8,ok
+2026-08-14,4concurrent,new,4,512,4,5.365,381.8,ok

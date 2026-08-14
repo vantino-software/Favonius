@@ -1,0 +1,25 @@
+scenario,delay,jitter,loss,rate_mbit,queue_bdp,tool,mode,run,elapsed_ms,throughput_mib_s,notes
+cross-country,25,0,0.5,100,1.00,tcp,cubic,1,86292,1.48,
+cross-country,25,0,0.5,100,1.00,tcp,cubic,2,93274,1.37,
+cross-country,25,0,0.5,100,1.00,tcp,cubic,3,100278,1.28,
+cross-country,25,0,0.5,100,1.00,tcp,cubic-p4,1,24354,5.26,
+cross-country,25,0,0.5,100,1.00,tcp,cubic-p4,2,24347,5.26,
+cross-country,25,0,0.5,100,1.00,tcp,cubic-p4,3,25351,5.05,
+transatlantic,50,0,1,100,1.00,tcp,cubic,1,0,0,TIMEOUT(no progress)
+transatlantic,50,0,1,100,1.00,tcp,cubic,2,0,0,TIMEOUT(no progress)
+transatlantic,50,0,1,100,1.00,tcp,cubic,3,0,0,TIMEOUT(no progress)
+transatlantic,50,0,1,100,1.00,tcp,cubic-p4,1,67596,1.89,
+transatlantic,50,0,1,100,1.00,tcp,cubic-p4,2,0,0,BAD(rc=0)
+transatlantic,50,0,1,100,1.00,tcp,cubic-p4,3,62599,2.04,
+satellite,150,0,2,100,1.00,tcp,cubic,1,0,0,TIMEOUT(no progress)
+satellite,150,0,2,100,1.00,tcp,cubic,2,0,0,TIMEOUT(no progress)
+satellite,150,0,2,100,1.00,tcp,cubic,3,0,0,TIMEOUT(no progress)
+satellite,150,0,2,100,1.00,tcp,cubic-p4,1,0,0,TIMEOUT(no progress)
+satellite,150,0,2,100,1.00,tcp,cubic-p4,2,0,0,TIMEOUT(no progress)
+satellite,150,0,2,100,1.00,tcp,cubic-p4,3,0,0,TIMEOUT(no progress)
+degraded,100,0,5,100,1.00,tcp,cubic,1,0,0,TIMEOUT(no progress)
+degraded,100,0,5,100,1.00,tcp,cubic,2,0,0,TIMEOUT(no progress)
+degraded,100,0,5,100,1.00,tcp,cubic,3,0,0,TIMEOUT(no progress)
+degraded,100,0,5,100,1.00,tcp,cubic-p4,1,0,0,TIMEOUT(no progress)
+degraded,100,0,5,100,1.00,tcp,cubic-p4,2,0,0,TIMEOUT(no progress)
+degraded,100,0,5,100,1.00,tcp,cubic-p4,3,0,0,TIMEOUT(no progress)

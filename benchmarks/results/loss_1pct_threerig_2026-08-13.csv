@@ -1,0 +1,22 @@
+date,rtt_ms,loss_pct,pair,arm,mbs,note
+2026-08-13,38,1,1,favonius-4x1-cycle,255.4,ABBA run1
+2026-08-13,38,1,1,iperf3-bbr-P4,233.8,ABBA run1
+2026-08-13,38,1,1,favonius-4x1-cycle,295.0,ABBA run2 (bbr first)
+2026-08-13,38,1,1,iperf3-bbr-P4,231.2,ABBA run2
+2026-08-13,38,1,2,favonius-4x1-cycle,297.4,ABBA run1
+2026-08-13,38,1,2,iperf3-bbr-P4,223.8,ABBA run1
+2026-08-13,38,1,2,favonius-4x1-cycle,351.7,ABBA run2 (bbr first)
+2026-08-13,38,1,2,iperf3-bbr-P4,232.5,ABBA run2
+2026-08-13,38,1,3,favonius-4x1-cycle,335.6,ABBA run1
+2026-08-13,38,1,3,iperf3-bbr-P4,228.8,ABBA run1
+2026-08-13,38,1,3,favonius-4x1-cycle,333.8,ABBA run2 (bbr first)
+2026-08-13,38,1,3,iperf3-bbr-P4,230.0,ABBA run2
+2026-08-13,38,1,1,favonius-1-adaptive,80.5,single transfer
+2026-08-13,38,1,1,favonius-1-default-auto,90.8,single transfer
+2026-08-13,38,1,1,favonius-1-cycle,70.8,single transfer
+2026-08-13,38,1,2,favonius-1-adaptive,75.0,single transfer
+2026-08-13,38,1,2,favonius-1-default-auto,75.4,single transfer
+2026-08-13,38,1,2,favonius-1-cycle,102.3,single transfer
+2026-08-13,38,1,3,favonius-1-adaptive,70.1,single transfer
+2026-08-13,38,1,3,favonius-1-default-auto,55.1,single transfer
+2026-08-13,38,1,3,favonius-1-cycle,93.9,single transfer

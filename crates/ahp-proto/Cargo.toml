@@ -1,0 +1,13 @@
+[package]
+name = "ahp-proto"
+description = "AHP wire format: packet framing, types, TLV encoding, and codec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+bitflags = { workspace = true }
+crc32c = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }

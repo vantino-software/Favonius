@@ -1,0 +1,74 @@
+[package]
+name = "ahp-cli"
+description = "Favonius CLI client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "ahp_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "favonius"
+path = "src/main.rs"
+
+[dependencies]
+ahp-proto = { workspace = true }
+ahp-congestion = { workspace = true }
+ahp-policy = { workspace = true }
+ahp-crypto = { workspace = true }
+ahp-compression = { workspace = true }
+ahp-sync = { workspace = true }
+blake3 = { workspace = true }
+zstd = { workspace = true }
+ahp-api = { workspace = true }
+ahp-platform-net = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+bytes = { workspace = true }
+rand = { workspace = true }
+socket2 = { workspace = true }
+memmap2 = { workspace = true }
+crossbeam-channel = "0.5"
+
+# Linux-only deps for the specialized send paths (sendmmsg zero-copy,
+# io_uring, AF_XDP, paced sendmsg). The cross-platform `Platform` variant
+# of `PacketSender` does not need any of these — it goes through
+# ahp-platform-net which has its own per-OS backends.
+[target.'cfg(target_os = "linux")'.dependencies]
+ahp-xdp = { workspace = true }
+nix = { workspace = true }
+# NOT io_uring-specific, and it must not be gated with it. `libc` backs
+# `thread_cpu_us()` — a plain `clock_gettime` — which is gated on
+# `target_os = "linux"` alone. Declared alongside io-uring (x86_64/aarch64
+# only), armv7 Linux compiled the call with no crate behind it and
+# `cross build --target armv7-unknown-linux-gnueabihf -p ahp-cli` failed
+# with "unresolved module libc" while the daemon cross-built fine. That is
+# why there was no ARM client.
+libc = "0.2"
+
+# io-uring ships prebuilt `sys.rs` bindings that cover x86_64 and aarch64
+# only; on armv7 it fails to compile outright ("the prebuilt sys.rs may not
+# be compatible with your target"). It was gated on target_os = "linux",
+# which armv7-unknown-linux-gnueabihf satisfies, so every 32-bit ARM build
+# of the CLI failed — including the Raspberry Pi, which is the natural
+# device for a transfer tool at the edge of a slow link.
+#
+# io_uring is a debug-only pacing mode (`--pacing iouring`, slower than GSO
+# on every measured path), so excluding it from those targets costs nothing
+# a user would notice.
+[target.'cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
+io-uring = "0.7"
+
+[dev-dependencies]
+ahp-api = { workspace = true }
+ahp-daemon = { workspace = true }
+tokio = { workspace = true }
+tracing-subscriber = { workspace = true }

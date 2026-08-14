@@ -1,0 +1,50 @@
+name: Performance report
+description: Throughput lower than expected, or a benchmark that disagrees with ours
+labels: [performance]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Measurements that disagree with ours are welcome. The README's
+        emulated table comes from one containerised host; the WAN and
+        hardware tables come from cloud machine pairs and physical
+        hardware, and the per-run data for all of them is in
+        benchmarks/results/.
+
+        Please include enough for someone to repeat it. A single number
+        without the path and the run count cannot be compared to anything.
+  - type: textarea
+    id: numbers
+    attributes:
+      label: What you measured
+      description: >
+        Throughput, how many runs, and the spread across them. Please not a
+        single run — this rig drifts about 20% between batches.
+    validations:
+      required: true
+  - type: textarea
+    id: path
+    attributes:
+      label: The path
+      description: >
+        RTT, loss, bottleneck rate, and whether the loss is injected
+        (netem) or produced by a queue. That distinction reorders the
+        results: the rate-based profiles win random-loss paths and lose
+        congestion-loss ones.
+    validations:
+      required: true
+  - type: input
+    id: profile
+    attributes:
+      label: Congestion profile
+      description: "`--congestion` value, and what you compared it against."
+    validations:
+      required: true
+  - type: textarea
+    id: baseline
+    attributes:
+      label: Baseline in the same batch
+      description: >
+        What did another tool, or another profile, achieve on the same path
+        in the same session? Cross-session comparisons on a drifting rig
+        have produced wrong conclusions here before.

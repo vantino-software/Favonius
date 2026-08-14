@@ -1,0 +1,39 @@
+# Favonius benchmark image — public edition.
+#
+# Builds Favonius from the repository source, so the harness in
+# benchmarks/scripts/bench_netem_fair_v2.sh runs with no prebuilt binaries
+# and no artefacts outside this repository.
+#
+# The internal image also carries the tools Favonius is compared against
+# (quic-bench, libudt, tsunami, uftp). Those are third-party binaries that
+# are not ours to redistribute, so `--tools favonius` is what works here;
+# other tools are skipped with a message. To reproduce a head-to-head,
+# build those tools yourself and drop them in /opt/bench/bin.
+#
+#   docker build -f Dockerfile.public -t favonius-bench:v2 <repo root>
+#
+# The harness builds this automatically when the image is missing.
+
+FROM rust:1.87-slim AS build
+WORKDIR /src
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends pkg-config libssl-dev \
+ && rm -rf /var/lib/apt/lists/*
+COPY Cargo.toml Cargo.lock ./
+COPY crates/ ./crates/
+RUN cargo build --release -p ahp-cli -p ahp-daemon
+
+FROM ubuntu:24.04
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends iproute2 libstdc++6 tcpdump iperf3 \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /src/target/release/favonius        /opt/bench/bin/favonius
+COPY --from=build /src/target/release/favonius-daemon /opt/bench/bin/favonius-daemon
+RUN chmod +x /opt/bench/bin/*
+
+# The harness resizes this to SIZE_MB on first use; it only has to exist.
+RUN mkdir -p /data && head -c 134217728 /dev/urandom > /data/test.bin
+
+ENV PATH=/opt/bench/bin:$PATH
+CMD ["sleep", "infinity"]

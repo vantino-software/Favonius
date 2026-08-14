@@ -1,0 +1,11 @@
+[package]
+name = "ahp-compression"
+description = "AHP compression layer: zstd profiles and adaptive compression"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zstd = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }

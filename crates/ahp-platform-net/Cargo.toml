@@ -1,0 +1,27 @@
+[package]
+name = "ahp-platform-net"
+description = "Cross-platform UDP batched send abstraction (Linux GSO, Windows USO, macOS parallel sendmsg)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true }
+libc = "0.2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_System_IO",
+    "Win32_System_SystemInformation",
+    "Wdk_System_SystemServices",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+crossbeam-channel = "0.5"

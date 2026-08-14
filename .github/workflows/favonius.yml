@@ -1,0 +1,218 @@
+name: Favonius CI
+
+on:
+  push:
+    branches: [main]
+
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # Full Favonius workspace build + test on Linux. This remains the
+  # canonical CI gate — `ahp-cli`, `ahp-daemon`, `ahp-xdp`, etc. all
+  # build only on Linux today.
+  build:
+    name: Build Favonius (Apache-2.0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: favonius-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: favonius-${{ runner.os }}-
+
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Clippy
+        # Warning-tolerant on purpose: ~45 pre-existing style lints remain
+        # (manual div_ceil / is_multiple_of, io::Error::other,
+        # too_many_arguments, ...). Not gated with `-D warnings` — some
+        # suggested fixes (e.g. `is_multiple_of`) need Rust newer than the
+        # MSRV, and clippy's lint set drifts with the stable toolchain.
+        # RUSTFLAGS is cleared here because the workflow-level "-D warnings"
+        # would turn those clippy warnings into hard errors.
+        env:
+          RUSTFLAGS: ""
+        run: cargo clippy --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace
+
+  # Cross-platform validation. `ahp-platform-net` is the portability
+  # layer; `ahp-cli` is built too because it is the crate that actually
+  # consumes it, so it is what catches Linux-only assumptions leaking
+  # into the rest of the codebase (the Linux-only pacing modes —
+  # iouring, xdp, zerocopy, perpacket — are cfg-gated behind
+  # target_os = "linux"). `ahp-daemon` is deliberately absent: it is
+  # Linux-only by design (nix recvfrom, AsRawFd, mmap output).
+  # The declared MSRV must be a fact, not an aspiration. It was 1.75 and was
+  # wrong by twelve releases: cargo 1.75 cannot even parse the v4 lockfile,
+  # and `is_multiple_of` (stable in 1.87) had been adopted from a clippy
+  # suggestion in ahp-crypto, silently raising the real floor. Nothing
+  # noticed because CI only ever built stable.
+  msrv:
+    name: Build at the declared MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: |
+          v=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "MSRV is $v"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - run: cargo check --workspace --all-targets
+
+  cross-platform:
+    name: cross-platform (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows-x86_64
+          - os: macos-14
+            label: macos-arm64
+          - os: macos-13
+            label: macos-x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: favonius-xplat-${{ matrix.label }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: favonius-xplat-${{ matrix.label }}-
+
+      - name: Build ahp-platform-net
+        run: cargo build -p ahp-platform-net
+
+      - name: Test ahp-platform-net
+        # cross_platform_loopback exercises both directions of the
+        # abstraction on each OS: create_best_sender (Linux GSO/sendmmsg,
+        # Windows USO/sendto-loop, macOS parallel sendmsg) and
+        # create_best_receiver (Linux recvmmsg, Windows/macOS recvfrom),
+        # round-tripping packets over a loopback UDP pair. This is the
+        # cross-platform smoke test — a full daemon transfer cannot run
+        # here because ahp-daemon is Linux-only.
+        run: cargo test -p ahp-platform-net
+
+      - name: Build ahp-cli (release)
+        run: cargo build --release -p ahp-cli
+
+  # End-to-end loopback transfer against a real daemon. Linux-only,
+  # because ahp-daemon is Linux-only.
+  #
+  # Beyond the happy path this guards a specific silent-corruption bug:
+  # the data port is shared across transfers, so late/retransmitted DATA
+  # from a finished transfer used to be written into the *next*
+  # transfer's file. It only shows up when consecutive transfers differ
+  # in encryption or compression — and the daemon still reported success
+  # — so the encrypted-then-plaintext sequence below is the regression
+  # test for it.
+  loopback-smoke:
+    name: Loopback transfer smoke test (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: favonius-smoke-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: favonius-smoke-${{ runner.os }}-
+
+      - name: Build daemon + CLI
+        run: cargo build --release -p ahp-daemon -p ahp-cli
+
+      - name: Start daemon
+        run: |
+          ./target/release/favonius-daemon \
+            --listen 127.0.0.1:7800 \
+            --protocol-listen 127.0.0.1:7801 \
+            --data-listen 127.0.0.1:7802 \
+            --log-level info > daemon.log 2>&1 &
+          echo $! > daemon.pid
+          sleep 3
+          grep -q "listener ready" daemon.log || { echo "daemon failed to start"; cat daemon.log; exit 1; }
+
+      - name: Transfer smoke test
+        run: |
+          set -euo pipefail
+          mkdir -p smoke/out
+          head -c 1048576 /dev/urandom > smoke/src.bin
+          EXPECT=$(sha256sum smoke/src.bin | cut -d' ' -f1)
+          fail=0
+
+          send() {
+            name="$1"; shift
+            out="$PWD/smoke/out/${name}.bin"
+            rm -f "$out"
+            if ! timeout 120 ./target/release/favonius send \
+                 "$PWD/smoke/src.bin" "127.0.0.1:7801:${out}" "$@" > /dev/null 2>&1; then
+              echo "FAIL ${name}: sender exited non-zero"; fail=1; return
+            fi
+            got=$(sha256sum "$out" 2>/dev/null | cut -d' ' -f1 || echo missing)
+            if [ "$got" = "$EXPECT" ]; then
+              echo "ok   ${name}"
+            else
+              echo "FAIL ${name}: sha256 mismatch (got ${got})"; fail=1
+            fi
+          }
+
+          send plain
+          send encrypted --encrypt
+          send enc_hp --encrypt --header-protect
+          send compressed --compression balanced
+          send streams8 --streams 8
+          send nack --ack-mode nack
+
+          # Regression guard: a plaintext transfer immediately after an
+          # encrypted one must not inherit the previous transfer's packets.
+          send enc_before_plain --encrypt --ack-mode nack
+          send plain_after_encrypted
+
+          exit $fail
+
+      - name: Stop daemon
+        if: always()
+        run: |
+          if [ -f daemon.pid ]; then kill "$(cat daemon.pid)" 2>/dev/null || true; fi
+
+      - name: Daemon log
+        if: failure()
+        run: cat daemon.log

@@ -1,0 +1,4 @@
+scenario,delay,jitter,loss,rate_mbit,queue_bdp,tool,mode,run,elapsed_ms,throughput_mib_s,notes
+transatlantic,50,0,1,100,1.00,tcp,cubic-p4,1,71653,1.79,
+transatlantic,50,0,1,100,1.00,tcp,cubic-p4,2,62610,2.04,
+transatlantic,50,0,1,100,1.00,tcp,cubic-p4,3,75605,1.69,

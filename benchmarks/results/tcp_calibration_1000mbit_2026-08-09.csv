@@ -1,0 +1,17 @@
+scenario,delay_ms,loss_pct,cc,run,mbit_s,mib_s,retransmits,max_cwnd_kb
+cross-country,25,0.5,cubic,1,19.6,2.3,611,559
+cross-country,25,0.5,cubic,2,18.5,2.2,705,729
+cross-country,25,0.5,reno,1,15.5,1.8,472,165
+cross-country,25,0.5,reno,2,17.6,2.1,540,93
+transatlantic,50,1,cubic,1,4.1,0.5,219,73
+transatlantic,50,1,cubic,2,4.2,0.5,203,56
+transatlantic,50,1,reno,1,4.3,0.5,241,55
+transatlantic,50,1,reno,2,5.5,0.7,250,103
+satellite,150,2,cubic,1,1.2,0.1,98,93
+satellite,150,2,cubic,2,0.6,0.1,114,22
+satellite,150,2,reno,1,0.8,0.1,93,36
+satellite,150,2,reno,2,1.0,0.1,91,48
+degraded,100,5,cubic,1,0.8,0.1,192,39
+degraded,100,5,cubic,2,0.8,0.1,198,25
+degraded,100,5,reno,1,0.9,0.1,197,32
+degraded,100,5,reno,2,0.8,0.1,214,22

@@ -1,0 +1,85 @@
+scenario,delay,jitter,loss,rate_mbit,queue_bdp,tool,mode,run,elapsed_ms,throughput_mib_s,notes
+baseline,0,0,0,100,1.0,favonius,classic,1,11851,10.80,
+baseline,0,0,0,100,1.0,favonius,classic,2,11790,10.86,
+baseline,0,0,0,100,1.0,favonius,classic,3,11864,10.79,
+baseline,0,0,0,100,1.0,favonius,model,1,11747,10.90,
+baseline,0,0,0,100,1.0,favonius,model,2,11730,10.91,
+baseline,0,0,0,100,1.0,favonius,model,3,11767,10.88,
+baseline,0,0,0,100,1.0,favonius,rl,1,11767,10.88,
+baseline,0,0,0,100,1.0,favonius,rl,2,11779,10.87,
+baseline,0,0,0,100,1.0,favonius,rl,3,11754,10.89,
+baseline,0,0,0,100,1.0,favonius,encrypt,1,11928,10.73,
+baseline,0,0,0,100,1.0,favonius,encrypt,2,11929,10.73,
+baseline,0,0,0,100,1.0,favonius,encrypt,3,11901,10.76,
+baseline,0,0,0,100,1.0,quic,cubic,1,11499,11.13,
+baseline,0,0,0,100,1.0,quic,cubic,2,11484,11.15,
+baseline,0,0,0,100,1.0,quic,cubic,3,11496,11.13,
+baseline,0,0,0,100,1.0,udt,default,1,11728,10.91,
+baseline,0,0,0,100,1.0,udt,default,2,11761,10.88,
+baseline,0,0,0,100,1.0,udt,default,3,11725,10.92,
+baseline,0,0,0,100,1.0,tsunami,rate4000M,1,0,0,TIMEOUT
+baseline,0,0,0,100,1.0,tsunami,rate4000M,2,0,0,TIMEOUT
+baseline,0,0,0,100,1.0,tsunami,rate4000M,3,0,0,TIMEOUT
+baseline,0,0,0,100,1.0,uftp,unicast,1,11791,10.86,data-phase 11.647s
+baseline,0,0,0,100,1.0,uftp,unicast,2,11922,10.74,data-phase 11.784s
+baseline,0,0,0,100,1.0,uftp,unicast,3,11835,10.82,data-phase 11.696s
+metro,5,0,0.1,100,1.0,favonius,classic,1,11914,10.74,
+metro,5,0,0.1,100,1.0,favonius,classic,2,11880,10.77,
+metro,5,0,0.1,100,1.0,favonius,classic,3,11939,10.72,
+metro,5,0,0.1,100,1.0,favonius,model,1,11925,10.73,
+metro,5,0,0.1,100,1.0,favonius,model,2,11984,10.68,
+metro,5,0,0.1,100,1.0,favonius,model,3,11865,10.79,
+metro,5,0,0.1,100,1.0,favonius,rl,1,11821,10.83,
+metro,5,0,0.1,100,1.0,favonius,rl,2,11824,10.83,
+metro,5,0,0.1,100,1.0,favonius,rl,3,11817,10.83,
+metro,5,0,0.1,100,1.0,favonius,encrypt,1,12055,10.62,
+metro,5,0,0.1,100,1.0,favonius,encrypt,2,12031,10.64,
+metro,5,0,0.1,100,1.0,favonius,encrypt,3,12054,10.62,
+metro,5,0,0.1,100,1.0,quic,cubic,1,0,0,TIMEOUT
+metro,5,0,0.1,100,1.0,quic,cubic,2,0,0,TIMEOUT
+metro,5,0,0.1,100,1.0,quic,cubic,3,0,0,TIMEOUT
+metro,5,0,0.1,100,1.0,udt,default,1,0,0,MISSING(rc=255)
+metro,5,0,0.1,100,1.0,udt,default,2,0,0,MISSING(rc=255)
+metro,5,0,0.1,100,1.0,udt,default,3,0,0,MISSING(rc=255)
+metro,5,0,0.1,100,1.0,tsunami,rate4000M,1,0,0,TIMEOUT
+metro,5,0,0.1,100,1.0,tsunami,rate4000M,2,0,0,TIMEOUT
+metro,5,0,0.1,100,1.0,tsunami,rate4000M,3,0,0,TIMEOUT
+metro,5,0,0.1,100,1.0,uftp,unicast,1,11790,10.86,data-phase 11.639s
+metro,5,0,0.1,100,1.0,uftp,unicast,2,11679,10.96,data-phase 11.538s
+metro,5,0,0.1,100,1.0,uftp,unicast,3,11704,10.94,data-phase 11.564s
+cross-country,25,0,0.5,100,1.0,favonius,classic,1,13983,9.15,
+cross-country,25,0,0.5,100,1.0,favonius,classic,2,14007,9.14,
+cross-country,25,0,0.5,100,1.0,favonius,classic,3,13656,9.37,
+cross-country,25,0,0.5,100,1.0,favonius,model,1,12965,9.87,
+cross-country,25,0,0.5,100,1.0,favonius,model,2,12883,9.94,
+cross-country,25,0,0.5,100,1.0,favonius,model,3,12904,9.92,
+cross-country,25,0,0.5,100,1.0,favonius,rl,1,12450,10.28,
+cross-country,25,0,0.5,100,1.0,favonius,rl,2,12442,10.29,
+cross-country,25,0,0.5,100,1.0,favonius,rl,3,12401,10.32,
+cross-country,25,0,0.5,100,1.0,favonius,encrypt,1,13767,9.30,
+cross-country,25,0,0.5,100,1.0,favonius,encrypt,2,14187,9.02,
+cross-country,25,0,0.5,100,1.0,favonius,encrypt,3,13868,9.23,
+cross-country,25,0,0.5,100,1.0,quic,cubic,1,0,0,TIMEOUT
+cross-country,25,0,0.5,100,1.0,quic,cubic,2,0,0,TIMEOUT
+cross-country,25,0,0.5,100,1.0,quic,cubic,3,0,0,TIMEOUT
+cross-country,25,0,0.5,100,1.0,udt,default,1,0,0,TIMEOUT
+cross-country,25,0,0.5,100,1.0,udt,default,2,0,0,TIMEOUT
+cross-country,25,0,0.5,100,1.0,udt,default,3,0,0,TIMEOUT
+cross-country,25,0,0.5,100,1.0,tsunami,rate4000M,1,0,0,TIMEOUT
+cross-country,25,0,0.5,100,1.0,tsunami,rate4000M,2,0,0,TIMEOUT
+cross-country,25,0,0.5,100,1.0,tsunami,rate4000M,3,0,0,TIMEOUT
+cross-country,25,0,0.5,100,1.0,uftp,unicast,1,14176,9.03,data-phase 13.918s
+cross-country,25,0,0.5,100,1.0,uftp,unicast,2,14215,9.00,data-phase 13.956s
+cross-country,25,0,0.5,100,1.0,uftp,unicast,3,14606,8.76,data-phase 14.355s
+transatlantic,50,0,1,100,1.0,favonius,classic,1,19162,6.68,
+transatlantic,50,0,1,100,1.0,favonius,classic,2,16909,7.57,
+transatlantic,50,0,1,100,1.0,favonius,classic,3,16994,7.53,
+transatlantic,50,0,1,100,1.0,favonius,model,1,13913,9.20,
+transatlantic,50,0,1,100,1.0,favonius,model,2,14169,9.03,
+transatlantic,50,0,1,100,1.0,favonius,model,3,14173,9.03,
+transatlantic,50,0,1,100,1.0,favonius,rl,1,13456,9.51,
+transatlantic,50,0,1,100,1.0,favonius,rl,2,13330,9.60,
+transatlantic,50,0,1,100,1.0,favonius,rl,3,13338,9.60,
+transatlantic,50,0,1,100,1.0,favonius,encrypt,1,19906,6.43,
+transatlantic,50,0,1,100,1.0,favonius,encrypt,2,18427,6.95,
+transatlantic,50,0,1,100,1.0,favonius,encrypt,3,19642,6.52,

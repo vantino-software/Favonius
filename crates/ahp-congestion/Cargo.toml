@@ -1,0 +1,12 @@
+[package]
+name = "ahp-congestion"
+description = "AHP congestion control algorithms: Classic, Model (BBR-like), and Fair"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tracing = { workspace = true }
+rand = { workspace = true }
+
+[dev-dependencies]

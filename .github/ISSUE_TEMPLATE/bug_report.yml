@@ -1,0 +1,69 @@
+name: Bug report
+description: Something does not work
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two things make transfer bugs diagnosable, and both are easy to
+        forget: **the daemon's log** and **both command lines**.
+
+        The daemon does not yet report its rejections to the sender, so a
+        refused transfer reaches you as `deadline has elapsed` — the same
+        message a firewall produces. If you saw that, the daemon log almost
+        certainly says why.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: sender
+    attributes:
+      label: Sender command line and output
+      description: The full `favonius …` command, and its output.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: daemon
+    attributes:
+      label: Daemon command line and log
+      description: >
+        The full `favonius-daemon …` command, and its log. Please re-run with
+        `--log-level debug` if you can — it is usually the only place the
+        real reason appears.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`favonius --version`, or the commit hash."
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: "OS and kernel (`uname -a`). Linux-only features: GSO, io_uring, AF_XDP."
+    validations:
+      required: true
+  - type: textarea
+    id: path
+    attributes:
+      label: Network path
+      description: >
+        LAN, WAN, VPN, container? Approximate RTT and loss if you know them,
+        and whether anything shapes the link. A congestion-control report
+        without this cannot be acted on.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: The daemon was started with `--dest-root` (it refuses to start otherwise)
+        - label: I checked the daemon's log, not just the sender's output

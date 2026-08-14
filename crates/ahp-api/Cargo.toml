@@ -1,0 +1,22 @@
+[package]
+name = "ahp-api"
+description = "Favonius REST and gRPC API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ahp-observability = { workspace = true }
+axum = { workspace = true }
+blake3 = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+reqwest = { version = "0.12", features = ["json"] }
+tracing-subscriber = { workspace = true }

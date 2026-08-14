@@ -1,0 +1,36 @@
+[package]
+name = "ahp-daemon"
+description = "Favonius transfer daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "ahp_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "favonius-daemon"
+path = "src/main.rs"
+
+[dependencies]
+ahp-proto = { workspace = true }
+ahp-observability = { workspace = true }
+ahp-api = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+socket2 = { workspace = true }
+nix = { workspace = true }
+memmap2 = { workspace = true }
+rand = { workspace = true }
+ahp-crypto = { workspace = true }
+ahp-compression = { workspace = true }
+ahp-sync = { workspace = true }
+blake3 = { workspace = true }
+zstd = { workspace = true }
+ahp-platform-net = { workspace = true }

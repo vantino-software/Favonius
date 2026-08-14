@@ -1,0 +1,19 @@
+[package]
+name = "ahp-crypto"
+description = "AHP cryptographic primitives: X25519, AES-256-GCM, Ed25519, HKDF"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+x25519-dalek = { workspace = true }
+ed25519-dalek = { workspace = true }
+aes = "0.8"
+aes-gcm = { workspace = true }
+zeroize = "1"
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+bytes = { workspace = true }

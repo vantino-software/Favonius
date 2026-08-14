@@ -1,0 +1,24 @@
+INVALID — do not use these numbers.
+
+Partial run, aborted 2026-08-03. Every server-shaped cell (quic, udt,
+tsunami) from the `metro` scenario onward is void, and the client-shaped
+cells (favonius, uftp) are not certifiable either.
+
+Cause: kill_servers ran
+
+    sh -c 'pkill -f favonius-daemon; pkill -x quic-bench; ...'
+
+and the `sh -c` process's own argv contains the literal text
+"favonius-daemon", so `pkill -f` matched the shell running it. The shell
+died at the first command (exit 143) and none of the remaining pkills ever
+ran. Favonius daemons were reaped, nothing else ever was.
+
+By the time this was caught, eight tsunamid processes had been spinning at
+99.8% CPU for 69 minutes, saturating the server's 100 Mbit tbf: a 10s
+sample showed 126 MB sent and 2.8M packets dropped. quic and udt were
+recorded as TIMEOUT in scenario after scenario; the CSV blamed the tools.
+A fresh instance runs quic on metro at 11.9 MB/s with no trouble.
+
+Kept only as the evidence trail for that diagnosis.
+Fixed in bench_netem_fair_v2.sh: no `-f` matching anywhere, per-process
+exec, SIGKILL escalation, and a loud warning for survivors.

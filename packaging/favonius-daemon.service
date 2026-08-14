@@ -1,0 +1,61 @@
+# systemd unit for the Favonius receiver.
+#
+#   sudo useradd --system --home /var/lib/favonius --shell /usr/sbin/nologin favonius
+#   sudo mkdir -p /srv/incoming && sudo chown favonius:favonius /srv/incoming
+#   sudo cp target/release/favonius-daemon /usr/local/bin/
+#   sudo cp packaging/favonius-daemon.service /etc/systemd/system/
+#   sudo systemctl enable --now favonius-daemon
+#
+# --dest-root is not optional and this unit will not start without it. A
+# daemon that accepts arbitrary sender-chosen paths can be made to write
+# /etc/cron.d, which is remote code execution.
+
+[Unit]
+Description=Favonius receiver daemon (AHP over UDP)
+Documentation=https://github.com/vantino-software/Favonius
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=favonius
+Group=favonius
+
+ExecStart=/usr/local/bin/favonius-daemon \
+    --listen 127.0.0.1:7800 \
+    --protocol-listen 0.0.0.0:7801 \
+    --data-listen 0.0.0.0:7802 \
+    --dest-root /srv/incoming \
+    --max-file-size-mb 0 \
+    --log-level info
+
+Restart=on-failure
+RestartSec=5s
+
+# The daemon needs: its destination root, and nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+ReadWritePaths=/srv/incoming
+
+# UDP only; no privileged ports needed for the defaults above.
+RestrictAddressFamilies=AF_INET AF_INET6
+
+# Multi-GB transfers are memory-mapped, not heap-allocated, but the
+# receive path still wants headroom.
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

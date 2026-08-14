@@ -1,0 +1,145 @@
+scenario,delay,jitter,loss,rate_mbit,queue_bdp,tool,mode,run,elapsed_ms,throughput_mib_s,notes
+baseline,0,0,0,100,1.0,favonius,classic,1,11883,10.77,
+baseline,0,0,0,100,1.0,favonius,classic,2,11848,10.80,
+baseline,0,0,0,100,1.0,favonius,classic,3,11854,10.80,
+baseline,0,0,0,100,1.0,favonius,model,1,11815,10.83,
+baseline,0,0,0,100,1.0,favonius,model,2,11843,10.81,
+baseline,0,0,0,100,1.0,favonius,model,3,11786,10.86,
+baseline,0,0,0,100,1.0,favonius,rl,1,11796,10.85,
+baseline,0,0,0,100,1.0,favonius,rl,2,11798,10.85,
+baseline,0,0,0,100,1.0,favonius,rl,3,11812,10.84,
+baseline,0,0,0,100,1.0,favonius,encrypt,1,12003,10.66,
+baseline,0,0,0,100,1.0,favonius,encrypt,2,11971,10.69,
+baseline,0,0,0,100,1.0,favonius,encrypt,3,11998,10.67,
+baseline,0,0,0,100,1.0,quic,cubic,1,11559,11.07,
+baseline,0,0,0,100,1.0,quic,cubic,2,11552,11.08,
+baseline,0,0,0,100,1.0,quic,cubic,3,11532,11.10,
+baseline,0,0,0,100,1.0,udt,default,1,11786,10.86,
+baseline,0,0,0,100,1.0,udt,default,2,11774,10.87,
+baseline,0,0,0,100,1.0,udt,default,3,11769,10.88,
+baseline,0,0,0,100,1.0,tsunami,rate4000M,1,0,0,TIMEOUT
+baseline,0,0,0,100,1.0,tsunami,rate4000M,2,0,0,TIMEOUT
+baseline,0,0,0,100,1.0,tsunami,rate4000M,3,0,0,TIMEOUT
+baseline,0,0,0,100,1.0,uftp,unicast,1,11979,10.69,data-phase 11.845s
+baseline,0,0,0,100,1.0,uftp,unicast,2,11981,10.68,data-phase 11.849s
+baseline,0,0,0,100,1.0,uftp,unicast,3,11948,10.71,data-phase 11.830s
+metro,5,0,0.1,100,1.0,favonius,classic,1,11946,10.71,
+metro,5,0,0.1,100,1.0,favonius,classic,2,11915,10.74,
+metro,5,0,0.1,100,1.0,favonius,classic,3,11900,10.76,
+metro,5,0,0.1,100,1.0,favonius,model,1,11939,10.72,
+metro,5,0,0.1,100,1.0,favonius,model,2,11945,10.72,
+metro,5,0,0.1,100,1.0,favonius,model,3,11916,10.74,
+metro,5,0,0.1,100,1.0,favonius,rl,1,11874,10.78,
+metro,5,0,0.1,100,1.0,favonius,rl,2,11846,10.81,
+metro,5,0,0.1,100,1.0,favonius,rl,3,11796,10.85,
+metro,5,0,0.1,100,1.0,favonius,encrypt,1,12077,10.60,
+metro,5,0,0.1,100,1.0,favonius,encrypt,2,12035,10.64,
+metro,5,0,0.1,100,1.0,favonius,encrypt,3,12051,10.62,
+metro,5,0,0.1,100,1.0,quic,cubic,1,11529,11.10,
+metro,5,0,0.1,100,1.0,quic,cubic,2,11647,10.99,
+metro,5,0,0.1,100,1.0,quic,cubic,3,11560,11.07,
+metro,5,0,0.1,100,1.0,udt,default,1,18759,6.82,
+metro,5,0,0.1,100,1.0,udt,default,2,17913,7.15,
+metro,5,0,0.1,100,1.0,udt,default,3,17900,7.15,
+metro,5,0,0.1,100,1.0,tsunami,rate4000M,1,0,0,TIMEOUT
+metro,5,0,0.1,100,1.0,tsunami,rate4000M,2,0,0,TIMEOUT
+metro,5,0,0.1,100,1.0,tsunami,rate4000M,3,0,0,TIMEOUT
+metro,5,0,0.1,100,1.0,uftp,unicast,1,11851,10.80,data-phase 11.687s
+metro,5,0,0.1,100,1.0,uftp,unicast,2,11752,10.89,data-phase 11.591s
+metro,5,0,0.1,100,1.0,uftp,unicast,3,11822,10.83,data-phase 11.681s
+cross-country,25,0,0.5,100,1.0,favonius,classic,1,14046,9.11,
+cross-country,25,0,0.5,100,1.0,favonius,classic,2,14295,8.95,
+cross-country,25,0,0.5,100,1.0,favonius,classic,3,14112,9.07,
+cross-country,25,0,0.5,100,1.0,favonius,model,1,12908,9.92,
+cross-country,25,0,0.5,100,1.0,favonius,model,2,13041,9.82,
+cross-country,25,0,0.5,100,1.0,favonius,model,3,12877,9.94,
+cross-country,25,0,0.5,100,1.0,favonius,rl,1,12438,10.29,
+cross-country,25,0,0.5,100,1.0,favonius,rl,2,12465,10.27,
+cross-country,25,0,0.5,100,1.0,favonius,rl,3,12410,10.31,
+cross-country,25,0,0.5,100,1.0,favonius,encrypt,1,14386,8.90,
+cross-country,25,0,0.5,100,1.0,favonius,encrypt,2,14264,8.97,
+cross-country,25,0,0.5,100,1.0,favonius,encrypt,3,14192,9.02,
+cross-country,25,0,0.5,100,1.0,quic,cubic,1,49694,2.58,
+cross-country,25,0,0.5,100,1.0,quic,cubic,2,45618,2.81,
+cross-country,25,0,0.5,100,1.0,quic,cubic,3,56889,2.25,
+cross-country,25,0,0.5,100,1.0,udt,default,1,23876,5.36,
+cross-country,25,0,0.5,100,1.0,udt,default,2,27190,4.71,
+cross-country,25,0,0.5,100,1.0,udt,default,3,22337,5.73,
+cross-country,25,0,0.5,100,1.0,tsunami,rate4000M,1,0,0,TIMEOUT
+cross-country,25,0,0.5,100,1.0,tsunami,rate4000M,2,0,0,TIMEOUT
+cross-country,25,0,0.5,100,1.0,tsunami,rate4000M,3,0,0,TIMEOUT
+cross-country,25,0,0.5,100,1.0,uftp,unicast,1,15391,8.32,data-phase 15.147s
+cross-country,25,0,0.5,100,1.0,uftp,unicast,2,15355,8.34,data-phase 15.132s
+cross-country,25,0,0.5,100,1.0,uftp,unicast,3,15653,8.18,data-phase 15.420s
+transatlantic,50,0,1,100,1.0,favonius,classic,1,20850,6.14,
+transatlantic,50,0,1,100,1.0,favonius,classic,2,16746,7.64,
+transatlantic,50,0,1,100,1.0,favonius,classic,3,15504,8.26,
+transatlantic,50,0,1,100,1.0,favonius,model,1,14267,8.97,
+transatlantic,50,0,1,100,1.0,favonius,model,2,14132,9.06,
+transatlantic,50,0,1,100,1.0,favonius,model,3,13906,9.20,
+transatlantic,50,0,1,100,1.0,favonius,rl,1,13313,9.61,
+transatlantic,50,0,1,100,1.0,favonius,rl,2,13386,9.56,
+transatlantic,50,0,1,100,1.0,favonius,rl,3,13310,9.62,
+transatlantic,50,0,1,100,1.0,favonius,encrypt,1,17602,7.27,
+transatlantic,50,0,1,100,1.0,favonius,encrypt,2,16433,7.79,
+transatlantic,50,0,1,100,1.0,favonius,encrypt,3,16401,7.80,
+transatlantic,50,0,1,100,1.0,quic,cubic,1,139881,0.92,
+transatlantic,50,0,1,100,1.0,quic,cubic,2,156742,0.82,
+transatlantic,50,0,1,100,1.0,quic,cubic,3,153424,0.83,
+transatlantic,50,0,1,100,1.0,udt,default,1,38812,3.30,
+transatlantic,50,0,1,100,1.0,udt,default,2,41484,3.09,
+transatlantic,50,0,1,100,1.0,udt,default,3,38597,3.32,
+transatlantic,50,0,1,100,1.0,tsunami,rate4000M,1,0,0,TIMEOUT
+transatlantic,50,0,1,100,1.0,tsunami,rate4000M,2,0,0,TIMEOUT
+transatlantic,50,0,1,100,1.0,tsunami,rate4000M,3,0,0,TIMEOUT
+transatlantic,50,0,1,100,1.0,uftp,unicast,1,20049,6.38,data-phase 19.675s
+transatlantic,50,0,1,100,1.0,uftp,unicast,2,19625,6.52,data-phase 19.250s
+transatlantic,50,0,1,100,1.0,uftp,unicast,3,19986,6.40,data-phase 19.622s
+satellite,150,0,2,100,1.0,favonius,classic,1,21020,6.09,
+satellite,150,0,2,100,1.0,favonius,classic,2,14545,8.80,
+satellite,150,0,2,100,1.0,favonius,classic,3,25789,4.96,
+satellite,150,0,2,100,1.0,favonius,model,1,18413,6.95,
+satellite,150,0,2,100,1.0,favonius,model,2,18022,7.10,
+satellite,150,0,2,100,1.0,favonius,model,3,16649,7.69,
+satellite,150,0,2,100,1.0,favonius,rl,1,19190,6.67,
+satellite,150,0,2,100,1.0,favonius,rl,2,18300,6.99,
+satellite,150,0,2,100,1.0,favonius,rl,3,17033,7.51,
+satellite,150,0,2,100,1.0,favonius,encrypt,1,14876,8.60,
+satellite,150,0,2,100,1.0,favonius,encrypt,2,14567,8.79,
+satellite,150,0,2,100,1.0,favonius,encrypt,3,14848,8.62,
+satellite,150,0,2,100,1.0,quic,cubic,1,0,0,TIMEOUT
+satellite,150,0,2,100,1.0,quic,cubic,2,0,0,TIMEOUT
+satellite,150,0,2,100,1.0,quic,cubic,3,0,0,TIMEOUT
+satellite,150,0,2,100,1.0,udt,default,1,55110,2.32,
+satellite,150,0,2,100,1.0,udt,default,2,69243,1.85,
+satellite,150,0,2,100,1.0,udt,default,3,76964,1.66,
+satellite,150,0,2,100,1.0,tsunami,rate4000M,1,0,0,TIMEOUT
+satellite,150,0,2,100,1.0,tsunami,rate4000M,2,0,0,TIMEOUT
+satellite,150,0,2,100,1.0,tsunami,rate4000M,3,0,0,TIMEOUT
+satellite,150,0,2,100,1.0,uftp,unicast,1,34309,3.73,data-phase 33.450s
+satellite,150,0,2,100,1.0,uftp,unicast,2,34929,3.66,data-phase 34.065s
+satellite,150,0,2,100,1.0,uftp,unicast,3,33449,3.83,data-phase 32.568s
+degraded,100,0,5,100,1.0,favonius,classic,1,21344,6.00,
+degraded,100,0,5,100,1.0,favonius,classic,2,24914,5.14,
+degraded,100,0,5,100,1.0,favonius,classic,3,28250,4.53,
+degraded,100,0,5,100,1.0,favonius,model,1,16012,7.99,
+degraded,100,0,5,100,1.0,favonius,model,2,16383,7.81,
+degraded,100,0,5,100,1.0,favonius,model,3,15756,8.12,
+degraded,100,0,5,100,1.0,favonius,rl,1,14755,8.68,
+degraded,100,0,5,100,1.0,favonius,rl,2,14564,8.79,
+degraded,100,0,5,100,1.0,favonius,rl,3,14818,8.64,
+degraded,100,0,5,100,1.0,favonius,encrypt,1,23349,5.48,
+degraded,100,0,5,100,1.0,favonius,encrypt,2,29999,4.27,
+degraded,100,0,5,100,1.0,favonius,encrypt,3,27456,4.66,
+degraded,100,0,5,100,1.0,quic,cubic,1,0,0,TIMEOUT
+degraded,100,0,5,100,1.0,quic,cubic,2,0,0,TIMEOUT
+degraded,100,0,5,100,1.0,quic,cubic,3,0,0,TIMEOUT
+degraded,100,0,5,100,1.0,udt,default,1,140699,0.91,
+degraded,100,0,5,100,1.0,udt,default,2,0,0,TIMEOUT
+degraded,100,0,5,100,1.0,udt,default,3,0,0,TIMEOUT
+degraded,100,0,5,100,1.0,tsunami,rate4000M,1,0,0,TIMEOUT
+degraded,100,0,5,100,1.0,tsunami,rate4000M,2,0,0,TIMEOUT
+degraded,100,0,5,100,1.0,tsunami,rate4000M,3,0,0,TIMEOUT
+degraded,100,0,5,100,1.0,uftp,unicast,1,28867,4.43,data-phase 28.254s
+degraded,100,0,5,100,1.0,uftp,unicast,2,29233,4.38,data-phase 28.628s
+degraded,100,0,5,100,1.0,uftp,unicast,3,31002,4.13,data-phase 30.388s
