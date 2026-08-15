@@ -996,6 +996,36 @@ Reproduce with `benchmarks/scripts/hardware_bench.sh` (needs SSH to the
 peer; measures its own TCP baseline first).
 
 
+### What these numbers are, and how to check them
+
+Every figure above is a **measurement of a specific rig on a specific
+date**, not a property of the software. The rig, the sample count and the
+spread are stated with each table, and the raw per-run CSVs are in
+[`benchmarks/results/`](benchmarks/results/README.md) — all of them,
+including the runs that went against us.
+
+**Measured** between 2026-08-09 and 2026-08-15, against the tree tagged
+`v0.1.0`. To reproduce a claim exactly, check out that tag: later commits
+change the code the numbers describe, and a figure quoted from a moving
+tree is not a figure.
+
+**Comparisons are conditional.** Favonius leads on long or lossy paths and
+**loses on a short clean LAN**, which is stated in the tables rather than
+omitted. Only rows with the same controller and socket counts may be
+compared; the tables say which those are. Competing tools were run with
+their documented settings and timed on the same wall clock as Favonius —
+`iperf3` is timed, not self-reported — but none of them were tuned by
+their authors, and a specialist could very likely do better with each.
+
+**Please check our work.** Independent reproduction is more useful to us
+than agreement, and a result that contradicts one of these tables is a bug
+report we want. `benchmarks/` contains the harnesses and the container
+definitions; open an issue with your CSV and your rig and we will either
+reproduce it or correct the claim. Two figures in this section already
+exist because an earlier version was wrong and got fixed in place rather
+than quietly deleted.
+
+
 ## Contributing
 
 Bug reports, and measurements that disagree with ours, are the most useful
