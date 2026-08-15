@@ -82,6 +82,92 @@ jobs:
           toolchain: ${{ steps.msrv.outputs.version }}
       - run: cargo check --workspace --all-targets
 
+  # CONTRIBUTING.md says every commit must carry a Signed-off-by line.
+  # Until now nothing checked it: the PR template had a checkbox, and an
+  # unsigned commit merged. This does not add a rule, it makes a published
+  # one true.
+  #
+  # Scoped to the commits the pull request actually adds. A full-history
+  # check would fail immediately -- none of the commits already on main
+  # carry a sign-off, including the ones that wrote the rule. That history
+  # is not being rewritten to satisfy a check added afterwards.
+  #
+  # What this proves is narrow, and worth stating so it is not oversold: a
+  # trailer is present. Not that the signer wrote the code, not that they
+  # had authority, and not that an employer is bound. It is a
+  # contemporaneous provenance assertion and a name to follow up with.
+  dco:
+    name: Sign-off (DCO)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Both endpoints must be present locally to walk the range.
+          fetch-depth: 0
+
+      - name: Check every commit in this PR is signed off
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          range="$BASE..$HEAD"
+          mapfile -t commits < <(git rev-list --no-merges "$range")
+
+          if [ ${#commits[@]} -eq 0 ]; then
+            echo "No non-merge commits in $range; nothing to check."
+            exit 0
+          fi
+
+          # Control: the check must be able to fail. A sign-off test that
+          # cannot distinguish a signed commit from an unsigned one is the
+          # same defect as the checkbox it replaces -- and this repository
+          # has shipped exactly that bug before, in a `grep -q | grep -v`
+          # pipeline that could never return non-zero.
+          if printf 'no trailer here\n' | git interpret-trailers --parse | grep -qi '^Signed-off-by:'; then
+            echo "::error::the sign-off test matches text that contains no trailer; it is broken"
+            exit 1
+          fi
+
+          fail=0
+          for c in "${commits[@]}"; do
+            subject=$(git log -1 --format='%s' "$c")
+            if git log -1 --format='%B' "$c" | git interpret-trailers --parse \
+                 | grep -qi '^Signed-off-by: .*<.*@.*>'; then
+              echo "ok    ${c:0:8}  $subject"
+            else
+              echo "MISS  ${c:0:8}  $subject"
+              fail=1
+            fi
+          done
+
+          if [ "$fail" -ne 0 ]; then
+            cat >&2 <<'MSG'
+
+          One or more commits have no Signed-off-by line.
+
+          The sign-off is the Developer Certificate of Origin 1.1: you are
+          certifying you wrote the patch, or otherwise have the right to
+          submit it under Apache-2.0. See CONTRIBUTING.md.
+
+          To fix the most recent commit:
+
+              git commit --amend -s
+              git push --force-with-lease
+
+          For several commits, where N is how many:
+
+              git rebase --signoff HEAD~N
+              git push --force-with-lease
+
+          MSG
+            exit 1
+          fi
+
+          echo "All ${#commits[@]} commit(s) signed off."
+
   cross-platform:
     name: cross-platform (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
