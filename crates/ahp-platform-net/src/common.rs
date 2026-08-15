@@ -146,7 +146,14 @@ pub struct RecvCapabilities {
     /// `recvmmsg`). When false, each `recv_batch` returns at most one
     /// datagram (Windows/macOS single-`recvfrom` backends).
     pub supports_batched_syscall: bool,
-    /// Largest single datagram (bytes) the backend can receive.
+    /// The `max_packet` size the backend was constructed with.
+    ///
+    /// **Not a guaranteed ceiling on what `packet()` returns.** The Linux
+    /// backend reads into 64 KiB slots whenever UDP_GRO is active, so it can
+    /// hand back a datagram substantially larger than this value; the macOS
+    /// and Windows backends truncate to it. Read it as the size the caller
+    /// asked for, not a limit the caller may rely on — anything that must
+    /// reject oversized packets has to check the length it actually got.
     pub max_packet_size: usize,
 }
 
