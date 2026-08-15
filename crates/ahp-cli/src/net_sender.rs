@@ -1525,6 +1525,12 @@ impl HeaderTransforms<'_> {
 }
 
 impl PacketSender {
+    /// Linux-only. Every caller is inside the `cfg(target_os = "linux")`
+    /// sender-selection block — the specialised backends fall back through
+    /// here. Other targets construct `new_inner` directly, so without this
+    /// gate the function is dead code there and `-D warnings` fails the
+    /// build.
+    #[cfg(target_os = "linux")]
     fn new(
         socket: &UdpSocket,
         remote: SocketAddr,

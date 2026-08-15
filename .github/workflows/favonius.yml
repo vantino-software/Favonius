@@ -161,10 +161,18 @@ jobs:
 
       - name: Start daemon
         run: |
+          # --dest-root is mandatory: without it the daemon refuses to
+          # start, because it would otherwise write to any absolute path a
+          # sender names. The root must exist before startup — the daemon
+          # canonicalises it. Every destination the smoke script sends to
+          # is an absolute path under this root, which confine_dest_path
+          # accepts, so the transfers below are unchanged by it.
+          mkdir -p smoke/out
           ./target/release/favonius-daemon \
             --listen 127.0.0.1:7800 \
             --protocol-listen 127.0.0.1:7801 \
             --data-listen 127.0.0.1:7802 \
+            --dest-root "$PWD/smoke/out" \
             --log-level info > daemon.log 2>&1 &
           echo $! > daemon.pid
           sleep 3
