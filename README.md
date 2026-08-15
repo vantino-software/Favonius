@@ -25,7 +25,7 @@ move files in production, read [SECURITY.md](SECURITY.md) first and expect
 - **Resumable** — a Merkle tree diff skips unchanged chunks (`--resume`)
 - **Directories and sync** — recursive tree transfer with glob filters;
   stateless one-way, mirror and append-only sync
-- **IPv4 and IPv6** — both families, with hostname resolution
+- **IPv4 everywhere, IPv6 on Linux** — with hostname resolution
 - **Adaptive** — six congestion-control profiles (`--congestion`), chosen
   from the probed link type by default (`auto`)
 
@@ -79,8 +79,15 @@ favonius sync ./project "receiver.example.com:7801:/srv/incoming/project"
 ```
 
 Destinations are `host:port:/path`. The host may be a name or a literal
-IPv4 or IPv6 address (`[2001:db8::1]:7801:/path`); names are resolved and
-IPv4 is preferred where both are offered.
+IPv4 address; names are resolved and IPv4 is preferred where both are
+offered.
+
+IPv6 literals use bracket form (`[2001:db8::1]:7801:/path`) and are
+**accepted on Linux only**. The Windows and macOS send backends do not
+implement IPv6 yet and refuse it with an explanatory error rather than
+failing later. The batched receive path also reports a V6 peer as
+`0.0.0.0:0`, so IPv6 should be treated as Linux-only and lightly exercised
+until there is an end-to-end test for it.
 
 `fvn` is a shorter alias for the `favonius` client — a symlink to the same
 binary, shipped in the release tarballs. Every example above works with

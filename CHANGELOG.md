@@ -63,7 +63,8 @@ protocol name is unaffected: it was and remains **AHP**.
 - **Resume** (`--resume`) — BLAKE3 Merkle tree diff, cached per destination.
 - **Directory transfer and stateless sync** — recursive trees, glob
   filters, `--dry-run`, and one-way / mirror / append-only modes.
-- **IPv4 and IPv6**, with hostname resolution.
+- **IPv4**, with hostname resolution. IPv6 is accepted on Linux only;
+  the Windows and macOS send backends refuse it with an explanatory error.
 - **Observability** — a progress line every two seconds with rate and ETA;
   Prometheus metrics at `GET /metrics`.
 - **`--adaptive`** — per-link parameter history, used only once a stored
