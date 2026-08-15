@@ -93,7 +93,14 @@ jobs:
             label: windows-x86_64
           - os: macos-14
             label: macos-arm64
-          - os: macos-13
+          # Intel macOS. This was macos-13, which GitHub retired on
+          # 2025-12-04: the label stopped resolving to a runner, so the job
+          # queued indefinitely, so every run stayed "queued" and never
+          # reported. Three genuine failures sat unnoticed behind it for
+          # fourteen hours. macos-15-intel is the replacement and is the
+          # last x86_64 macOS image Actions will offer — it goes away in
+          # autumn 2027, after which this row becomes arm64 or disappears.
+          - os: macos-15-intel
             label: macos-x86_64
     steps:
       - uses: actions/checkout@v4
