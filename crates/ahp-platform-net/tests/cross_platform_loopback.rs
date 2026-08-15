@@ -210,3 +210,76 @@ fn create_best_receiver_round_trip() {
     assert_eq!(received, NUM_PACKETS, "missing packets: {:?}", got);
     assert!(got.iter().all(|&g| g));
 }
+
+/// An oversized datagram must not break the receive loop.
+///
+/// The platforms disagree natively, in four ways, and this test exists to
+/// pin down the one property they can all honour rather than to pretend
+/// they behave identically:
+///
+/// - **Linux with UDP_GRO** reads into 64 KiB slots, so `max_packet` is not
+///   a cap at all and the whole datagram comes back.
+/// - **Linux without GRO** and **macOS** truncate to the buffer and report
+///   the bytes they kept.
+/// - **Windows** filled the buffer, discarded the excess, and *also*
+///   returned `SOCKET_ERROR` with `WSAEMSGSIZE` — so on Windows alone an
+///   oversized packet became a receive-loop I/O error, which is why
+///   `ahp-daemon`'s `oversized_data_payload_is_rejected_and_writes_nothing`
+///   failed there and only there. That is now normalised to a truncated
+///   read.
+///
+/// This matters beyond tidiness: any peer can send a jumbo datagram to an
+/// open port, so a backend that errors on one hands every peer a way to
+/// disturb the receive loop. Rejecting oversized packets is the daemon's
+/// job, by validating length — and it can only do that if the backend
+/// hands it a packet instead of an error.
+///
+/// So the contract asserted here is deliberately narrow, and is the part
+/// that is actually load-bearing: **do not error, and still work
+/// afterwards.** Exactly how many bytes survive is a platform's own
+/// business and nothing downstream depends on it.
+#[test]
+fn oversized_datagram_does_not_break_the_receive_loop() {
+    const SMALL_BUF: usize = 512;
+
+    let receiver_sock = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+    receiver_sock
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set recv timeout");
+    let recv_addr: SocketAddr = receiver_sock.local_addr().expect("recv addr");
+    let recv_raw = raw_socket_of(&receiver_sock);
+
+    let sender_sock = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+
+    // Comfortably larger than the receive buffer, and larger than any real
+    // AHP wire packet.
+    let jumbo = vec![0xEEu8; SMALL_BUF * 6];
+    sender_sock
+        .send_to(&jumbo, recv_addr)
+        .expect("send oversized datagram");
+
+    let mut rx = create_best_receiver(recv_raw, 1, SMALL_BUF);
+    let n = rx
+        .recv_batch()
+        .expect("an oversized datagram must not fail the receive loop");
+    assert_eq!(n, 1, "the datagram should still be reported");
+    assert!(!rx.packet(0).is_empty(), "reported an empty packet");
+
+    // The control, and the assertion that would actually have caught a bad
+    // fix: a backend that reported the oversized datagram but wedged itself
+    // doing so would pass everything above and still be broken in the way
+    // that matters.
+    let normal = [0x42u8; 64];
+    sender_sock
+        .send_to(&normal, recv_addr)
+        .expect("send normal datagram");
+    let n = rx
+        .recv_batch()
+        .expect("the receiver must still work after an oversized datagram");
+    assert_eq!(n, 1);
+    assert_eq!(
+        rx.packet(0).len(),
+        normal.len(),
+        "wrong length for the datagram after the oversized one"
+    );
+}
