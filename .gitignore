@@ -103,3 +103,14 @@ benchmarks/dst/
 benchmarks/docker/
 !benchmarks/docker/bench-v2/
 !benchmarks/docker/bench-v2/Dockerfile.public
+
+# Generated per-target at release time by packaging/gen-attribution.py.
+# Ships inside the tarball; not tracked, because it is derived from
+# Cargo.lock and would rot silently if it were.
+THIRD-PARTY-LICENSES.md
+
+# Local release bundles
+*.bundle
+
+# Local tooling and working notes, not part of the project.
+CLAUDE.md

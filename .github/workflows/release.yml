@@ -42,6 +42,15 @@ jobs:
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} -p ahp-cli -p ahp-daemon
 
+      # MIT, the BSD family, ISC and Unicode-3.0 all condition redistribution
+      # on reproducing their notices. Shipping only our own LICENSE and
+      # NOTICE does not satisfy them, and THIRD-PARTY.md does not either --
+      # it lists licence *names*, not the texts the licences require. This
+      # emits the texts for exactly what is linked into this target's
+      # binaries, and fails the job rather than write an empty file.
+      - name: Generate third-party licence notices
+        run: python3 packaging/gen-attribution.py ${{ matrix.target }} THIRD-PARTY-LICENSES.md
+
       - name: Package
         run: |
           d=favonius-${{ github.ref_name }}-${{ matrix.target }}
@@ -54,6 +63,7 @@ jobs:
           # stores symlinks as symlinks, so it survives the round trip.
           ln -s favonius "$d"/fvn
           cp README.md LICENSE NOTICE SECURITY.md CHANGELOG.md "$d"/
+          cp THIRD-PARTY-LICENSES.md "$d"/
           cp packaging/favonius-daemon.service "$d"/
           tar czf "$d".tar.gz "$d"
           sha256sum "$d".tar.gz > "$d".tar.gz.sha256
