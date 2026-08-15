@@ -5,6 +5,14 @@ from `Cargo.lock` by `cargo metadata`; regenerate after any dependency
 change. This lists the **build graph**, so it includes dev- and
 build-only crates that are not in a shipped binary.
 
+This file is a **catalogue**, not an attribution notice. Several of
+these licences require that their text accompany a binary distribution;
+naming them here does not satisfy that. The release tarballs carry
+`THIRD-PARTY-LICENSES.md`, generated per target by
+`packaging/gen-attribution.py`, which contains the full texts for exactly
+the crates linked into the shipped binaries — a narrower set than this
+file, which lists the whole build graph.
+
 **No dependency is under a copyleft licence that would affect
 redistribution.** The one entry naming LGPL offers it as an alternative in
 a disjunction (`MIT OR Apache-2.0 OR LGPL-2.1-or-later`), so the MIT or
