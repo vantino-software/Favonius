@@ -7,14 +7,12 @@
 //! Binds to the daemon's protocol port and handles incoming AHP transfers.
 //! Each transfer: HELLO → HELLO_ACK → MANIFEST → DATA* → FINISH.
 
-use std::io::IoSlice;
 use std::net::SocketAddr;
-use std::os::unix::io::AsRawFd;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::{Bytes, BytesMut};
 use memmap2::MmapMut;
-use nix::sys::socket::{sendmsg, MsgFlags, SockaddrStorage};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::UdpSocket;
 
@@ -394,6 +392,23 @@ fn drop_mapping_pages(map: &MmapMut, offset: usize, len: usize) {
         };
     }
 }
+
+/// Handle the writeback pacer needs, where it exists.
+///
+/// `sync_file_range(2)` is a Linux syscall with no portable equivalent —
+/// `fsync` is not the same thing, because the whole point is to start (or
+/// wait on) writeback for *one range* without forcing the entire file. So
+/// the pacer is Linux-only, and on every other target this degrades to a
+/// unit: the option is still threaded through the receive loop so the
+/// signature does not fork, and the code that would read it is compiled
+/// out alongside the syscalls.
+#[cfg(target_os = "linux")]
+pub(crate) type WritebackFd = std::os::unix::io::RawFd;
+
+/// See the Linux variant. Non-Linux targets have no range-writeback
+/// facility, so this carries nothing.
+#[cfg(not(target_os = "linux"))]
+pub(crate) type WritebackFd = ();
 
 /// Linux: how much received-but-not-yet-durable data we tolerate before the
 /// receive loop starts waiting for the disk.
@@ -1315,12 +1330,9 @@ async fn run_transfer_slot(
 
     // Restore non-blocking on the control socket. The bitmap recv thread
     // can change socket flags and an error path may leave them anywhere.
-    unsafe {
-        let flags = nix::libc::fcntl(socket.as_raw_fd(), nix::libc::F_GETFL);
-        if flags != -1 {
-            nix::libc::fcntl(socket.as_raw_fd(), nix::libc::F_SETFL, flags | nix::libc::O_NONBLOCK);
-        }
-    }
+    // `set_nonblocking` is the portable spelling of the fcntl pair — on
+    // Windows the equivalent is `ioctlsocket(FIONBIO)`, which socket2 picks.
+    let _ = socket2::SockRef::from(&*socket).set_nonblocking(true);
 
     // A shared data socket outlives this transfer, so stale DATA left on it
     // would be read by the next transfer's receive thread; drain it. A
@@ -2103,11 +2115,16 @@ async fn handle_transfer(
     };
 
     // Kept for writeback pacing in the receive loop; the mapping alone does
-    // not expose the file behind it.
-    let dest_fd_raw = {
+    // not expose the file behind it. Only Linux has range writeback, so
+    // elsewhere this is a unit and the pacer compiles out — see
+    // [`WritebackFd`].
+    #[cfg(target_os = "linux")]
+    let dest_fd_raw: WritebackFd = {
         use std::os::unix::io::AsRawFd;
         dest_file.as_raw_fd()
     };
+    #[cfg(not(target_os = "linux"))]
+    let dest_fd_raw: WritebackFd = ();
 
     let mut mmap = if manifest.file_size > 0 {
         // SAFETY: We are the sole writer.
@@ -2169,12 +2186,15 @@ async fn handle_transfer(
     if let Some(r) = releaser {
         r.release_tail(used_ports).await;
     }
-    let data_fds: Vec<std::os::unix::io::RawFd> =
-        data_socks.iter().take(used_ports).map(|s| s.as_raw_fd()).collect();
+    // This transfer's data sockets, in ascending port order. The receive
+    // loop needs the sockets themselves, not just their handles: it answers
+    // on whichever one a stream arrived at, and `send_to` needs an owner.
+    let data_socks_used: Vec<Arc<UdpSocket>> =
+        data_socks.iter().take(used_ports).cloned().collect();
     let took_run = manifest.features.iter().any(|f| f == FEATURE_PER_STREAM_PORTS);
     if data_socks.len() > 1 {
         tracing::info!(
-            reserved = data_socks.len(), polling = data_fds.len(),
+            reserved = data_socks.len(), polling = data_socks_used.len(),
             base = data_port, num_streams, took_run,
             "per-stream data port run"
         );
@@ -2186,11 +2206,11 @@ async fn handle_transfer(
         ahp_proto::data::AckMode::Bitmap => {
             // Use dedicated I/O thread on the DATA socket(s) — the control
             // socket stays in the async main loop, always responsive.
-            let fds = data_fds.clone();
-            // `SockaddrStorage` holds either family; this used to refuse v6
+            let socks = data_socks_used.clone();
+            // `SocketAddr` holds either family; this used to refuse v6
             // outright, which is why an IPv6 handshake succeeded and then
             // stalled at 0 chunks with "transfer failed: IPv6 not supported".
-            let peer_sin = SockaddrStorage::from(peer);
+            let peer_sin = peer;
 
             // Socket stays non-blocking — the thread uses spin-wait recv.
 
@@ -2202,7 +2222,7 @@ async fn handle_transfer(
             let handle = std::thread::Builder::new()
                 .name("favonius-recv".into())
                 .spawn(move || {
-                    threaded_bitmap_recv(fds, Some(dest_fd_raw), peer_sin, conn_id, seq, mmap, streams, ps, tc, sk, is_compressed, false, is_hp)
+                    threaded_bitmap_recv(socks, Some(dest_fd_raw), peer_sin, conn_id, seq, mmap, streams, ps, tc, sk, is_compressed, false, is_hp)
                 })
                 .map_err(|e| format!("spawn recv thread: {e}"))?;
 
@@ -2231,11 +2251,11 @@ async fn handle_transfer(
         ahp_proto::data::AckMode::Nack => {
             // NACK mode also uses the threaded receiver for performance.
             // The thread sends both ACK bitmaps AND NACKs for detected gaps.
-            let fds = data_fds.clone();
-            // `SockaddrStorage` holds either family; this used to refuse v6
+            let socks = data_socks_used.clone();
+            // `SocketAddr` holds either family; this used to refuse v6
             // outright, which is why an IPv6 handshake succeeded and then
             // stalled at 0 chunks with "transfer failed: IPv6 not supported".
-            let peer_sin = SockaddrStorage::from(peer);
+            let peer_sin = peer;
             let ps = manifest.payload_size;
             let tc = manifest.total_chunks;
             let sk = session_keys.clone();
@@ -2244,7 +2264,7 @@ async fn handle_transfer(
             let handle = std::thread::Builder::new()
                 .name("favonius-recv-nack".into())
                 .spawn(move || {
-                    threaded_bitmap_recv(fds, Some(dest_fd_raw), peer_sin, conn_id, seq, mmap, streams, ps, tc, sk, is_compressed, true, is_hp)
+                    threaded_bitmap_recv(socks, Some(dest_fd_raw), peer_sin, conn_id, seq, mmap, streams, ps, tc, sk, is_compressed, true, is_hp)
                 })
                 .map_err(|e| format!("spawn recv thread: {e}"))?;
 
@@ -2480,16 +2500,41 @@ struct ThreadedRecvResult {
     finish_replied: bool,
 }
 
-/// Send raw bytes to a destination via sendmsg (no tokio, no allocation).
-fn send_raw(buf: &[u8], fd: std::os::unix::io::RawFd, dest: &SockaddrStorage) {
-    let iov = [IoSlice::new(buf)];
+/// Send raw bytes to a destination (no tokio, no allocation).
+///
+/// Borrows the socket's native handle and issues a plain `sendto` on it.
+/// The sockets are non-blocking, so this has the semantics the receive loop
+/// needs — a full transmit queue returns `WouldBlock` rather than parking
+/// the thread — without going through the async runtime, which matters
+/// because every caller is on a dedicated OS thread outside it.
+///
+/// Failures other than `WouldBlock` are dropped: an ACK is soft state and
+/// the next one carries the same information.
+fn send_raw(buf: &[u8], sock: &UdpSocket, dest: SocketAddr) {
+    let sock = socket2::SockRef::from(sock);
+    let dest: socket2::SockAddr = dest.into();
     loop {
-        match sendmsg::<SockaddrStorage>(fd, &iov, &[], MsgFlags::MSG_DONTWAIT, Some(dest)) {
+        match sock.send_to(buf, &dest) {
             Ok(_) => break,
-            Err(nix::errno::Errno::EAGAIN) => { std::hint::spin_loop(); continue; }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                std::hint::spin_loop();
+                continue;
+            }
             Err(_) => break,
         }
     }
+}
+
+/// Send a header and its payload as one datagram, without joining them.
+///
+/// `sendmsg` with two iovecs did this natively. `send_to` takes one buffer,
+/// so the two are staged into a caller-provided scratch buffer instead —
+/// still one datagram on the wire, still no heap allocation per send.
+fn send_raw_vectored(hdr: &[u8], payload: &[u8], scratch: &mut Vec<u8>, sock: &UdpSocket, dest: SocketAddr) {
+    scratch.clear();
+    scratch.extend_from_slice(hdr);
+    scratch.extend_from_slice(payload);
+    send_raw(scratch, sock, dest);
 }
 
 /// Where a finished ACK datagram goes: straight out of the receive loop, or
@@ -2515,16 +2560,16 @@ enum AckSink {
     /// with a per-stream port run there is no single "the" fd any more, and
     /// a queue that assumed one would answer every stream from the base
     /// port.
-    Queued(std::sync::mpsc::Sender<(std::os::unix::io::RawFd, Vec<u8>)>),
+    Queued(std::sync::mpsc::Sender<(Arc<UdpSocket>, Vec<u8>)>),
 }
 
 impl AckSink {
     #[inline]
-    fn send(&self, buf: &[u8], fd: std::os::unix::io::RawFd, dest: &SockaddrStorage) {
+    fn send(&self, buf: &[u8], sock: &Arc<UdpSocket>, dest: SocketAddr) {
         match self {
-            AckSink::Inline => send_raw(buf, fd, dest),
+            AckSink::Inline => send_raw(buf, sock, dest),
             AckSink::Queued(tx) => {
-                let _ = tx.send((fd, buf.to_vec()));
+                let _ = tx.send((Arc::clone(sock), buf.to_vec()));
             }
         }
     }
@@ -2549,11 +2594,15 @@ impl AckSink {
 /// wherever it arrives, so a sender that ignores the run, one that uses it,
 /// and a retransmission that crosses ports are all handled by the same code.
 fn threaded_bitmap_recv(
-    fds: Vec<std::os::unix::io::RawFd>,
+    socks: Vec<Arc<UdpSocket>>,
     // Destination file descriptor, for writeback pacing. `None` disables it
-    // (tests, and any path without a real file behind the mapping).
-    dest_fd: Option<std::os::unix::io::RawFd>,
-    peer_addr: SockaddrStorage,
+    // (tests, and any path without a real file behind the mapping). Writeback
+    // pacing is a Linux facility; see [`WritebackFd`]. Off Linux the pacer
+    // compiles out and nothing reads this, but it stays in the signature so
+    // the call sites do not have to fork.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+    dest_fd: Option<WritebackFd>,
+    peer_addr: SocketAddr,
     conn_id: u64,
     mut seq: u64,
     mut mmap: MmapMut,
@@ -2574,17 +2623,17 @@ fn threaded_bitmap_recv(
     // until this is measured. `FAVONIUS_ACK_THREAD=1` enables it.
     let ack_thread = std::env::var("FAVONIUS_ACK_THREAD").map(|v| v == "1").unwrap_or(false);
     let (ack_sink, ack_join) = if ack_thread {
-        let (tx, rx) = std::sync::mpsc::channel::<(std::os::unix::io::RawFd, Vec<u8>)>();
+        let (tx, rx) = std::sync::mpsc::channel::<(Arc<UdpSocket>, Vec<u8>)>();
         let dest = peer_addr;
         let join = std::thread::Builder::new()
             .name("ahp-ack-tx".into())
             .spawn(move || {
                 // Drain whatever else is already queued before syscalling, so
                 // a feedback event covering N streams costs one wakeup.
-                while let Ok((fd, first)) = rx.recv() {
-                    send_raw(&first, fd, &dest);
-                    while let Ok((fd, next)) = rx.try_recv() {
-                        send_raw(&next, fd, &dest);
+                while let Ok((sock, first)) = rx.recv() {
+                    send_raw(&first, &sock, dest);
+                    while let Ok((sock, next)) = rx.try_recv() {
+                        send_raw(&next, &sock, dest);
                     }
                 }
             })
@@ -2593,14 +2642,20 @@ fn threaded_bitmap_recv(
     } else {
         (AckSink::Inline, None)
     };
-    if fds.is_empty() {
+    if socks.is_empty() {
         return Err("threaded_bitmap_recv: no data sockets".into());
     }
     // One receiver per socket. Each carries its own RECV_BATCH x MAX_PACKET
     // staging buffer (48 KB), so a full run costs under 400 KB.
-    let mut receivers: Vec<Box<dyn ahp_platform_net::PacketBatchReceiver>> = fds
+    let mut receivers: Vec<Box<dyn ahp_platform_net::PacketBatchReceiver>> = socks
         .iter()
-        .map(|&fd| ahp_platform_net::create_best_receiver(fd, RECV_BATCH, MAX_PACKET))
+        .map(|s| {
+            ahp_platform_net::create_best_receiver(
+                ahp_platform_net::raw_socket(&**s),
+                RECV_BATCH,
+                MAX_PACKET,
+            )
+        })
         .collect();
     // Where the round-robin resumes. Kept across iterations so a socket that
     // is always polled last does not starve behind a busy one.
@@ -2608,8 +2663,11 @@ fn threaded_bitmap_recv(
     // The socket a given stream's feedback goes out on. Streams beyond the
     // run share the last port — the same mapping the sender uses to pick a
     // destination, so an ACK leaves by the port its DATA arrived on.
-    let fd_for = |stream_id: usize| fds[stream_id.min(fds.len() - 1)];
+    let sock_for = |stream_id: usize| &socks[stream_id.min(socks.len() - 1)];
     let mut ack_buf = [0u8; 1152]; // >= 42 hdr + 26 ACK hdr + MAX_ACK_BITMAP_BYTES
+    // Scratch for the one send that carries a header plus a separate payload
+    // (NackRange). Reused so the NACK path stays allocation-free.
+    let mut nack_tx_buf: Vec<u8> = Vec::with_capacity(512);
     let mut decrypt_buf = [0u8; MAX_PACKET]; // scratch for in-place decryption
     let mut last_ack = Instant::now();
     let mut pending_hello: Option<(u64, std::net::SocketAddr)> = None;
@@ -2769,7 +2827,7 @@ fn threaded_bitmap_recv(
     let mut dbg_datagrams: u64 = 0;
     let mut dbg_empty_polls: u64 = 0;
     let mut dbg_full_batches: u64 = 0;
-    let mut dbg_per_fd: Vec<u64> = vec![0; fds.len()];
+    let mut dbg_per_fd: Vec<u64> = vec![0; socks.len()];
     let dbg_start = Instant::now();
 
     'recv: loop {
@@ -2815,7 +2873,7 @@ fn threaded_bitmap_recv(
                             &mut ack_buf, conn_id, seq,
                             si as u32, stream.chunk_base, hc, &bm,
                         );
-                        ack_sink.send(&ack_buf[..n], fd_for(si), &peer_addr);
+                        ack_sink.send(&ack_buf[..n], sock_for(si), peer_addr);
                         seq += 1;
                         stream.since_ack = 0;
                     }
@@ -2835,7 +2893,7 @@ fn threaded_bitmap_recv(
         // The socket this batch came off. Replies that are not attributable
         // to a stream go back out of it, so a peer sees answers from the
         // port it addressed.
-        let cur_fd = fds[idx];
+        let cur_sock = &socks[idx];
         let receiver = &mut receivers[idx];
 
         for pkt_idx in 0..batch_n {
@@ -3011,15 +3069,14 @@ fn threaded_bitmap_recv(
                                     &mut pkt_buf, PacketType::NackRange, conn_id, seq,
                                     nbuf.len() as u32,
                                 );
-                                // Send header + payload as two iovecs; the
-                                // scatter-gather send places the payload
-                                // immediately after the header in the datagram.
-                                {
-                                    let hdr_slice = &pkt_buf[..n];
-                                    let payload_slice = &nbuf[..];
-                                    let iov = [IoSlice::new(hdr_slice), IoSlice::new(payload_slice)];
-                                    let _ = sendmsg::<SockaddrStorage>(fd_for(sid), &iov, &[], MsgFlags::MSG_DONTWAIT, Some(&peer_addr));
-                                }
+                                // Header then payload, one datagram. Staged
+                                // through a reused scratch buffer rather than
+                                // two iovecs, so the wire format is unchanged
+                                // and nothing is allocated per send.
+                                send_raw_vectored(
+                                    &pkt_buf[..n], &nbuf[..], &mut nack_tx_buf,
+                                    sock_for(sid), peer_addr,
+                                );
                                 seq += 1;
                             }
                             stream.gap_start_local = None;
@@ -3043,7 +3100,7 @@ fn threaded_bitmap_recv(
                             &mut ack_buf, conn_id, seq,
                             sid as u32, stream.chunk_base, hc, &bm,
                         );
-                        ack_sink.send(&ack_buf[..n], fd_for(sid), &peer_addr);
+                        ack_sink.send(&ack_buf[..n], sock_for(sid), peer_addr);
                         seq += 1;
                         stream.since_ack = 0;
                     }
@@ -3068,7 +3125,7 @@ fn threaded_bitmap_recv(
                                 &mut ack_buf, conn_id, seq,
                                 si as u32, stream.chunk_base, hc, &bm,
                             );
-                            ack_sink.send(&ack_buf[..n], fd_for(si), &peer_addr);
+                            ack_sink.send(&ack_buf[..n], sock_for(si), peer_addr);
                             seq += 1;
                         }
                     }
@@ -3117,13 +3174,13 @@ fn threaded_bitmap_recv(
                                 &mut ack_buf, conn_id, seq,
                                 si as u32, stream.chunk_base, hc, &bm,
                             );
-                            ack_sink.send(&ack_buf[..n], fd_for(si), &peer_addr);
+                            ack_sink.send(&ack_buf[..n], sock_for(si), peer_addr);
                             seq += 1;
                         }
                         let n = encode_ctrl_packet_into(
                             &mut ack_buf, PacketType::Finish, conn_id, seq,
                         );
-                        ack_sink.send(&ack_buf[..n], cur_fd, &peer_addr);
+                        ack_sink.send(&ack_buf[..n], cur_sock, peer_addr);
                         finish_replied = true;
                         break 'recv;
                     }
@@ -3133,7 +3190,7 @@ fn threaded_bitmap_recv(
                             &mut ack_buf, PacketType::PathProbeAck, conn_id,
                             decoded.header.packet_number,
                         );
-                        ack_sink.send(&ack_buf[..n], cur_fd, &peer_addr);
+                        ack_sink.send(&ack_buf[..n], cur_sock, peer_addr);
                     }
                     PacketType::KeyUpdate => {
                         // Sender rotated keys — rotate our side to match, but
@@ -3183,14 +3240,14 @@ fn threaded_bitmap_recv(
                         // mode we will not expect.
                         let new_conn = decoded.header.connection_id;
                         let hello_from = match recv_from_addr {
-                            a @ std::net::SocketAddr::V4(_) => SockaddrStorage::from(a),
+                            a @ std::net::SocketAddr::V4(_) => a,
                             _ => peer_addr,
                         };
                         let n = encode_ctrl_packet_with_payload_into(
                             &mut ack_buf, PacketType::HelloAck, new_conn, 0, 1,
                         );
                         ack_buf[n] = HelloAckMode::Plaintext.to_byte();
-                        send_raw(&ack_buf[..n + 1], cur_fd, &hello_from);
+                        send_raw(&ack_buf[..n + 1], cur_sock, hello_from);
                         pending_hello = Some((new_conn, recv_from_addr));
                         // In tail mode this transfer is already complete —
                         // exit promptly so the queued transfer takes the
@@ -3215,7 +3272,7 @@ fn threaded_bitmap_recv(
                         &mut ack_buf, conn_id, seq,
                         si as u32, stream.chunk_base, hc, &bm,
                     );
-                    ack_sink.send(&ack_buf[..n], fd_for(si), &peer_addr);
+                    ack_sink.send(&ack_buf[..n], sock_for(si), peer_addr);
                     seq += 1;
                     stream.since_ack = 0;
                 }
@@ -3278,7 +3335,7 @@ fn threaded_bitmap_recv(
         let secs = dbg_start.elapsed().as_secs_f64().max(1e-9);
         let polls = dbg_batches + dbg_empty_polls;
         tracing::info!(
-            sockets = fds.len(),
+            sockets = socks.len(),
             datagrams = dbg_datagrams,
             batches = dbg_batches,
             mean_batch = format!("{:.2}", dbg_datagrams as f64 / dbg_batches.max(1) as f64),
@@ -4470,7 +4527,6 @@ mod tests {
 
     #[test]
     fn tail_responder_answers_retransmitted_data() {
-        use std::os::unix::io::AsRawFd;
 
         const CONN: u64 = 0x5AFE;
         const CHUNKS: u64 = 4;
@@ -4485,16 +4541,25 @@ mod tests {
             .set_read_timeout(Some(std::time::Duration::from_millis(200)))
             .unwrap();
         let peer_sin = match sender.local_addr().unwrap() {
-            a @ std::net::SocketAddr::V4(_) => super::SockaddrStorage::from(a),
+            a @ std::net::SocketAddr::V4(_) => a,
             _ => panic!("IPv4 only"),
         };
 
         let streams = build_recv_streams(CHUNKS, 1);
         let mmap = memmap2::MmapMut::map_anon(CHUNKS as usize * PAYLOAD).unwrap();
-        let raw_fd = daemon.as_raw_fd();
+        // `threaded_bitmap_recv` takes the sockets themselves. Adopting a
+        // std socket into tokio requires a runtime context; the receive loop
+        // never touches the reactor (it borrows the native handle), but the
+        // registration must outlive the thread, so `rt` is held to the end.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all().build().unwrap();
+        let daemon_sock = {
+            let _guard = rt.enter();
+            std::sync::Arc::new(tokio::net::UdpSocket::from_std(daemon).unwrap())
+        };
         let handle = std::thread::spawn(move || {
             super::threaded_bitmap_recv(
-                vec![raw_fd], None, peer_sin, CONN, 0, mmap, streams, PAYLOAD, CHUNKS,
+                vec![daemon_sock], None, peer_sin, CONN, 0, mmap, streams, PAYLOAD, CHUNKS,
                 None, false, false, false,
             )
         });
@@ -4578,7 +4643,6 @@ mod tests {
     /// rejected everything would pass a "no corruption" check on its own.
     #[test]
     fn oversized_data_payload_is_rejected_and_writes_nothing() {
-        use std::os::unix::io::AsRawFd;
         const CONN: u64 = 0x0DD5;
         const CHUNKS: u64 = 4;
         const PAYLOAD: usize = 64;
@@ -4588,16 +4652,25 @@ mod tests {
         let daemon_addr = daemon.local_addr().unwrap();
         let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         let peer_sin = match sender.local_addr().unwrap() {
-            a @ std::net::SocketAddr::V4(_) => super::SockaddrStorage::from(a),
+            a @ std::net::SocketAddr::V4(_) => a,
             _ => panic!("IPv4 only"),
         };
 
         let streams = build_recv_streams(CHUNKS, 1);
         let mmap = memmap2::MmapMut::map_anon(CHUNKS as usize * PAYLOAD).unwrap();
-        let raw_fd = daemon.as_raw_fd();
+        // `threaded_bitmap_recv` takes the sockets themselves. Adopting a
+        // std socket into tokio requires a runtime context; the receive loop
+        // never touches the reactor (it borrows the native handle), but the
+        // registration must outlive the thread, so `rt` is held to the end.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all().build().unwrap();
+        let daemon_sock = {
+            let _guard = rt.enter();
+            std::sync::Arc::new(tokio::net::UdpSocket::from_std(daemon).unwrap())
+        };
         let handle = std::thread::spawn(move || {
             super::threaded_bitmap_recv(
-                vec![raw_fd], None, peer_sin, CONN, 0, mmap, streams, PAYLOAD, CHUNKS,
+                vec![daemon_sock], None, peer_sin, CONN, 0, mmap, streams, PAYLOAD, CHUNKS,
                 None, false, false, false,
             )
         });

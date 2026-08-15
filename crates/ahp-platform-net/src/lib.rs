@@ -144,3 +144,25 @@ pub type RawSocket = std::os::unix::io::RawFd;
 
 #[cfg(windows)]
 pub type RawSocket = std::os::windows::io::RawSocket;
+
+/// Borrow a socket's platform-native handle.
+///
+/// The two families spell this differently — `AsRawFd::as_raw_fd` on Unix,
+/// `AsRawSocket::as_raw_socket` on Windows — and a caller that only wants a
+/// [`RawSocket`] to hand to [`create_best_sender`] or
+/// [`create_best_receiver`] should not have to carry a `cfg` of its own.
+///
+/// The handle is *borrowed*: it is valid only while `sock` is alive, and
+/// closing it remains the owner's business.
+#[cfg(unix)]
+#[inline]
+pub fn raw_socket<S: std::os::unix::io::AsRawFd + ?Sized>(sock: &S) -> RawSocket {
+    sock.as_raw_fd()
+}
+
+/// Borrow a socket's platform-native handle. See the Unix variant for docs.
+#[cfg(windows)]
+#[inline]
+pub fn raw_socket<S: std::os::windows::io::AsRawSocket + ?Sized>(sock: &S) -> RawSocket {
+    sock.as_raw_socket()
+}

@@ -212,16 +212,31 @@ jobs:
         # abstraction on each OS: create_best_sender (Linux GSO/sendmmsg,
         # Windows USO/sendto-loop, macOS parallel sendmsg) and
         # create_best_receiver (Linux recvmmsg, Windows/macOS recvfrom),
-        # round-tripping packets over a loopback UDP pair. This is the
-        # cross-platform smoke test — a full daemon transfer cannot run
-        # here because ahp-daemon is Linux-only.
+        # round-tripping packets over a loopback UDP pair.
         run: cargo test -p ahp-platform-net
 
       - name: Build ahp-cli (release)
         run: cargo build --release -p ahp-cli
 
-  # End-to-end loopback transfer against a real daemon. Linux-only,
-  # because ahp-daemon is Linux-only.
+      - name: Build ahp-daemon
+        # The receive path is portable: batched receive goes through
+        # PacketBatchReceiver, ACKs go out on a borrowed socket handle, and
+        # the only platform-specific code left is the sync_file_range
+        # writeback pacer, cfg'd out along with its `nix` dependency. This
+        # step is what keeps that true — a Unix-only call reintroduced into
+        # the daemon fails here rather than at a user.
+        run: cargo build -p ahp-daemon
+
+      - name: Test ahp-daemon
+        # Includes the two tests that drive threaded_bitmap_recv end to end
+        # over a loopback UDP pair, so the receive loop is exercised on this
+        # OS and not merely compiled for it.
+        run: cargo test -p ahp-daemon
+
+  # End-to-end loopback transfer against a real daemon binary. Linux-only
+  # for now: the daemon builds and its receive loop is unit-tested on all
+  # three platforms (see cross-platform above), but the full CLI-driven
+  # transfer script has not been ported off bash/Linux.
   #
   # Beyond the happy path this guards a specific silent-corruption bug:
   # the data port is shared across transfers, so late/retransmitted DATA

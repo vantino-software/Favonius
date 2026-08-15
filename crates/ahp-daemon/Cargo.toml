@@ -25,7 +25,6 @@ bytes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 socket2 = { workspace = true }
-nix = { workspace = true }
 memmap2 = { workspace = true }
 rand = { workspace = true }
 ahp-crypto = { workspace = true }
@@ -34,3 +33,10 @@ ahp-sync = { workspace = true }
 blake3 = { workspace = true }
 zstd = { workspace = true }
 ahp-platform-net = { workspace = true }
+
+# `nix` is used only by the writeback pacer, which wraps `sync_file_range(2)`
+# — a Linux syscall with no portable equivalent. Gating the dependency keeps
+# it out of Windows and macOS builds entirely rather than relying on the
+# call sites' `cfg`s alone.
+[target.'cfg(target_os = "linux")'.dependencies]
+nix = { workspace = true }

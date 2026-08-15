@@ -1025,7 +1025,8 @@ crates/
   ahp-crypto          X25519, AES-256-GCM, HKDF, header protection, key rotation, tickets
   ahp-congestion      congestion-control profiles
   ahp-xdp             AF_XDP zero-copy transport
-  ahp-platform-net    cross-platform UDP send (Linux GSO, Windows USO, macOS sendmsg)
+  ahp-platform-net    cross-platform UDP send + receive (Linux GSO/recvmmsg,
+                      Windows USO/recvfrom, macOS sendmsg/recvfrom)
   ahp-compression     per-chunk zstd
   ahp-sync            Merkle tree for resume verification
   ahp-cli             sender CLI (favonius)
@@ -1040,7 +1041,7 @@ benchmarks/           reproducible benchmark harness
 ## Building
 
 ```bash
-# Prerequisites: Rust 1.87+ (Linux for GSO/sendmmsg)
+# Prerequisites: Rust 1.87+
 cargo build --release
 cargo test --workspace
 
@@ -1049,6 +1050,25 @@ cross build --release --target armv7-unknown-linux-gnueabihf -p ahp-daemon
 ```
 
 See [docs/BUILD.md](docs/BUILD.md) for Windows and macOS targets.
+
+### Platform support
+
+Sender and daemon build and test on Linux, Windows and macOS; CI exercises
+all three. The kernel fast paths are selected per platform at runtime —
+GSO/`sendmmsg` and `recvmmsg` on Linux, USO and `recvfrom` on Windows,
+parallel `sendmsg` and `recvfrom` on macOS — so a build on any of them is
+functional, and Linux is the fastest of the three.
+
+Two facilities are Linux-only and compile out elsewhere: **AF_XDP
+zero-copy** (`ahp-xdp`) and the **writeback pacer**, which uses
+`sync_file_range(2)` to keep a receiver whose disk is slower than its link
+from filling memory until the kernel stops it. Without the pacer a
+receiver on a slow disk degrades the way it did before that work: as
+back-pressure through dropped packets rather than as a controlled slowdown.
+
+End-to-end transfer throughput has been measured on Linux. The Windows and
+macOS backends are exercised by CI but **have not been benchmarked on real
+hardware**, so no performance claim is made for them.
 
 ## Documentation
 
