@@ -117,6 +117,17 @@ pub const CAP_NONE: u32 = 0;
 /// [`data_port_count`].
 pub const CAP_PER_STREAM_PORTS: u32 = 1 << 0;
 
+/// Bit 1: the daemon understands the peer-authentication material a client
+/// may append to its HELLO, and has checked it.
+///
+/// A client that requires authentication uses this to tell "the daemon
+/// checked me and let me in" apart from "the daemon is older than this
+/// feature and ignored the bytes entirely". Both look identical on the wire
+/// otherwise — the append is designed to be ignorable — so without this bit
+/// a client could believe it had authenticated to a daemon that has no idea
+/// what peer authentication is.
+pub const CAP_PEER_AUTH: u32 = 1 << 1;
+
 /// Bits 8..16 of the capability bitfield: how many contiguous data ports are
 /// reserved, counting the advertised one.
 const DATA_PORT_COUNT_SHIFT: u32 = 8;
@@ -147,6 +158,90 @@ pub fn data_port_count(capabilities: u32) -> usize {
         return 1;
     }
     (((capabilities & DATA_PORT_COUNT_MASK) >> DATA_PORT_COUNT_SHIFT) as usize).max(1)
+}
+
+// ── HELLO (client → daemon), full-handshake form ───────────────────────────
+
+/// Flag byte for a full-DH HELLO.
+pub const HELLO_FULL_DH: u8 = 0x01;
+
+/// `[flag] [32-byte ephemeral public] [16-byte nonce]`.
+pub const HELLO_FULL_DH_LEN: usize = 1 + 32 + 16;
+
+/// Client auth material appended to a full-DH HELLO: Ed25519 identity
+/// public key + offer signature.
+const PEER_AUTH_LEN: usize = 32 + 64;
+
+/// Encode a full-DH HELLO, optionally authenticating the client.
+///
+/// The auth material is **appended after** the fixed 49-byte prefix rather
+/// than signalled by a new flag byte, and that choice is the whole
+/// compatibility story. A daemon built before this feature dispatches on
+/// `flag == 0x01 && len >= 49` and reads the key and nonce at fixed
+/// offsets, so trailing bytes are invisible to it: it completes the
+/// handshake exactly as it always did, simply without checking who is
+/// calling.
+///
+/// A new flag value would have done the opposite. Unknown flags fall
+/// through to the plaintext branch, so an authenticated client talking to
+/// an older daemon would have silently downgraded to an unencrypted
+/// transfer — worse than not authenticating at all.
+///
+/// Whether the daemon *understood* the appended bytes is answered by
+/// [`CAP_PEER_AUTH`] in its HELLO_ACK, not by guessing from success.
+pub fn encode_hello_full(
+    ephemeral_pub: &[u8; 32],
+    nonce: &[u8; 16],
+    peer_auth: Option<(&[u8; 32], &[u8; 64])>,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(HELLO_FULL_DH_LEN + PEER_AUTH_LEN);
+    buf.push(HELLO_FULL_DH);
+    buf.extend_from_slice(ephemeral_pub);
+    buf.extend_from_slice(nonce);
+    if let Some((identity_pub, signature)) = peer_auth {
+        buf.extend_from_slice(identity_pub);
+        buf.extend_from_slice(signature);
+    }
+    buf
+}
+
+/// A parsed full-DH HELLO.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HelloFull {
+    pub ephemeral_pub: [u8; 32],
+    pub nonce: [u8; 16],
+    /// Present when the client appended an identity and offer signature.
+    /// Absent means the client did not authenticate — which is every client
+    /// built before this existed, and is not by itself an error.
+    pub peer_auth: Option<([u8; 32], [u8; 64])>,
+}
+
+/// Decode a full-DH HELLO payload. `None` when it is not one, or is short.
+///
+/// Trailing bytes that are not exactly the auth material are ignored rather
+/// than rejected: this format is explicitly extensible by appending, and a
+/// decoder that refused unknown trailing bytes would make the next
+/// extension a breaking change.
+pub fn decode_hello_full(payload: &[u8]) -> Option<HelloFull> {
+    if payload.first() != Some(&HELLO_FULL_DH) || payload.len() < HELLO_FULL_DH_LEN {
+        return None;
+    }
+    let mut ephemeral_pub = [0u8; 32];
+    ephemeral_pub.copy_from_slice(&payload[1..33]);
+    let mut nonce = [0u8; 16];
+    nonce.copy_from_slice(&payload[33..HELLO_FULL_DH_LEN]);
+
+    let auth_end = HELLO_FULL_DH_LEN + PEER_AUTH_LEN;
+    let peer_auth = if payload.len() >= auth_end {
+        let mut identity_pub = [0u8; 32];
+        identity_pub.copy_from_slice(&payload[HELLO_FULL_DH_LEN..HELLO_FULL_DH_LEN + 32]);
+        let mut signature = [0u8; 64];
+        signature.copy_from_slice(&payload[HELLO_FULL_DH_LEN + 32..auth_end]);
+        Some((identity_pub, signature))
+    } else {
+        None
+    };
+    Some(HelloFull { ephemeral_pub, nonce, peer_auth })
 }
 
 /// Magic + bitfield.
@@ -532,5 +627,80 @@ mod tests {
     fn busy_ack_never_carries_capabilities() {
         let buf = encode_hello_ack_payload(HelloAckMode::Plaintext, None, None, None, 0xFFFF);
         assert_eq!(buf.len(), 1, "no port means no capability block");
+    }
+
+    // ── HELLO with client authentication ──────────────────────────────────
+
+    const EPH: [u8; 32] = [7u8; 32];
+    const HN: [u8; 16] = [9u8; 16];
+    const CID: [u8; 32] = [1u8; 32];
+    const CSIG: [u8; 64] = [2u8; 64];
+
+    /// The compatibility property the whole design rests on: what an older
+    /// daemon reads out of an authenticated HELLO is byte-for-byte what it
+    /// reads out of an unauthenticated one.
+    #[test]
+    fn appending_client_auth_does_not_disturb_the_fixed_prefix() {
+        let plain = encode_hello_full(&EPH, &HN, None);
+        let authed = encode_hello_full(&EPH, &HN, Some((&CID, &CSIG)));
+
+        assert_eq!(plain.len(), HELLO_FULL_DH_LEN);
+        assert_eq!(
+            &authed[..HELLO_FULL_DH_LEN],
+            &plain[..],
+            "the bytes an old daemon reads changed"
+        );
+        // Which is exactly how such a daemon parses it: fixed offsets.
+        assert_eq!(authed[0], HELLO_FULL_DH);
+        assert_eq!(&authed[1..33], &EPH);
+        assert_eq!(&authed[33..49], &HN);
+    }
+
+    #[test]
+    fn client_auth_round_trips() {
+        let buf = encode_hello_full(&EPH, &HN, Some((&CID, &CSIG)));
+        let got = decode_hello_full(&buf).expect("decodes");
+        assert_eq!(got.ephemeral_pub, EPH);
+        assert_eq!(got.nonce, HN);
+        assert_eq!(got.peer_auth, Some((CID, CSIG)));
+    }
+
+    #[test]
+    fn an_unauthenticated_hello_reports_no_peer_auth() {
+        // The negative control: without it the test above passes for a
+        // decoder that invents auth material.
+        let buf = encode_hello_full(&EPH, &HN, None);
+        assert_eq!(decode_hello_full(&buf).expect("decodes").peer_auth, None);
+    }
+
+    #[test]
+    fn a_truncated_auth_append_is_read_as_absent_not_as_garbage() {
+        // A half-written append must never decode into a partial identity
+        // that then fails verification for the wrong reason — or worse,
+        // matches something.
+        let mut buf = encode_hello_full(&EPH, &HN, Some((&CID, &CSIG)));
+        buf.truncate(HELLO_FULL_DH_LEN + 40);
+        assert_eq!(decode_hello_full(&buf).expect("decodes").peer_auth, None);
+    }
+
+    #[test]
+    fn a_short_or_wrong_flag_payload_is_not_a_full_hello() {
+        assert!(decode_hello_full(&[]).is_none());
+        assert!(decode_hello_full(&[0x00]).is_none());
+        // Right flag, one byte short of the fixed prefix.
+        let mut buf = encode_hello_full(&EPH, &HN, None);
+        buf.truncate(HELLO_FULL_DH_LEN - 1);
+        assert!(decode_hello_full(&buf).is_none());
+    }
+
+    #[test]
+    fn the_peer_auth_capability_is_its_own_bit() {
+        // Must not collide with the per-stream-port bit or the count field
+        // packed into bits 8..16.
+        assert_eq!(CAP_PEER_AUTH & CAP_PER_STREAM_PORTS, 0);
+        assert_eq!(data_port_count(CAP_PEER_AUTH), 1, "read as a port count");
+        let both = per_stream_ports(4) | CAP_PEER_AUTH;
+        assert_eq!(data_port_count(both), 4, "the count survives the new bit");
+        assert!(both & CAP_PEER_AUTH != 0);
     }
 }

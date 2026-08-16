@@ -88,6 +88,17 @@ enum Command {
         /// encrypted handshake is anonymous (unauthenticated).
         #[arg(long)]
         server_key: Option<String>,
+        /// This client's own Ed25519 identity key file (see
+        /// `favonius-daemon keygen`, which writes the same format). Sent so
+        /// a daemon running --allow-peer / --require-peer-auth can tell who
+        /// is calling. Requires --encrypt.
+        #[arg(long)]
+        identity: Option<std::path::PathBuf>,
+        /// Refuse to transfer unless the daemon confirms it authenticated
+        /// this client. Without it, a daemon too old to understand the
+        /// identity accepts the transfer and never says it ignored it.
+        #[arg(long)]
+        require_peer_auth: bool,
         /// Use adaptive policy (learns optimal parameters over time)
         #[arg(long)]
         adaptive: bool,
@@ -231,7 +242,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
 
-        Command::Send { source, destination, compression, congestion, ack_mode, streams, pacing, transport, encrypt, header_protect, resume, server_key, adaptive, policy_path, include, exclude, dry_run, bandwidth_limit } => {
+        Command::Send { source, destination, compression, congestion, ack_mode, streams, pacing, transport, encrypt, header_protect, resume, server_key, identity, require_peer_auth, adaptive, policy_path, include, exclude, dry_run, bandwidth_limit } => {
             // No code path reads this. It was destructured away with `..`,
             // so `--bandwidth-limit 10` capped nothing and said nothing —
             // the user asked for a rate limit and got line rate. Fail
@@ -331,6 +342,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if pinned_key.is_some() && !encrypt {
                     eprintln!("Warning: --server-key has no effect without --encrypt");
                 }
+                // Our own identity, for authenticating to the daemon.
+                let client_identity = match identity.as_deref() {
+                    Some(path) => {
+                        match ahp_crypto::signatures::SigningIdentity::load_from_file(path) {
+                            Ok(id) => Some(id),
+                            Err(e) => { eprintln!("Error: {e}"); std::process::exit(1); }
+                        }
+                    }
+                    None => None,
+                };
+                // Refused rather than warned, unlike --server-key above.
+                // A pin that does nothing leaves the transfer no worse than
+                // it was; claiming to require authentication while sending
+                // none is a false statement about the transfer, and the
+                // caller may be a script that checks nothing else.
+                if require_peer_auth && client_identity.is_none() {
+                    eprintln!(
+                        "Error: --require-peer-auth needs --identity: there is nothing to \
+                         authenticate with."
+                    );
+                    std::process::exit(2);
+                }
+                if client_identity.is_some() && !encrypt {
+                    eprintln!(
+                        "Error: --identity needs --encrypt: the identity is presented inside \
+                         the encrypted handshake, so without it the daemon is never told who \
+                         is calling."
+                    );
+                    std::process::exit(2);
+                }
                 let src_path = std::path::PathBuf::from(&source);
                 let meta = match std::fs::metadata(&src_path) {
                     Ok(m) => m,
@@ -405,7 +446,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let failed = run_ahp_sends(
                     remote_addr, &items, cc_profile, ack, streams, &pacing, encrypt,
                     compress_profile, resume, adaptive_policy.as_mut(), header_protect,
-                    pinned_key,
+                    pinned_key, client_identity.as_ref(), require_peer_auth,
                 ).await;
                 if failed > 0 {
                     eprintln!("{failed} of {} transfer(s) failed.", items.len());
@@ -596,8 +637,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut failed = 0usize;
             if !items.is_empty() {
                 failed = run_ahp_sends(
+                    // `sync` carries neither a pin nor an identity: it has
+                    // no --server-key today either, so it is consistently
+                    // unauthenticated rather than half-authenticated. A
+                    // daemon running --require-peer-auth will refuse it.
                     remote_addr, &items, cc_profile, AckMode::Bitmap, streams, "auto",
-                    encrypt, compress_profile, false, None, false, None,
+                    encrypt, compress_profile, false, None, false, None, None, false,
                 ).await;
             }
 
@@ -797,6 +842,8 @@ async fn run_ahp_sends(
     mut adaptive_policy: Option<&mut AdaptivePolicy>,
     header_protect: bool,
     pinned_key: Option<[u8; 32]>,
+    client_identity: Option<&ahp_crypto::signatures::SigningIdentity>,
+    require_peer_auth: bool,
 ) -> usize {
     let multi = items.len() > 1;
     let mut failed = 0usize;
@@ -810,6 +857,7 @@ async fn run_ahp_sends(
         match net_sender::send_file(
             remote_addr, src, dst, cc_profile, ack, streams, pacing, encrypt,
             compress_profile, resume, adaptive_policy.as_deref(), header_protect, pinned_key,
+            client_identity, require_peer_auth,
         ).await {
             Ok(stats) => {
                 sent_bytes += stats.bytes_sent;

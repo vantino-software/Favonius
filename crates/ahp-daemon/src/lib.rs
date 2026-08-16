@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod net_receiver;
+pub mod peer_auth;
 pub mod tcp_fallback;
 
 use ahp_api::AppState;

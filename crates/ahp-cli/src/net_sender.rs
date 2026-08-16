@@ -1925,6 +1925,14 @@ pub async fn send_file(
     adaptive: Option<&AdaptivePolicy>,
     header_protect: bool,
     pinned_server_key: Option<[u8; 32]>,
+    // This client's own identity, used to authenticate *to* the daemon.
+    // `None` sends an unauthenticated HELLO — what every client did before
+    // this existed.
+    client_identity: Option<&ahp_crypto::signatures::SigningIdentity>,
+    // Abort unless the daemon says it checked us. Without it, a daemon too
+    // old to understand the appended material completes the transfer
+    // happily and the client cannot tell it was never authenticated.
+    require_peer_auth: bool,
 ) -> Result<TransferStats, Box<dyn std::error::Error + Send + Sync>> {
     // Validate the source path before any network I/O: paths like "/" or
     // ending in ".." have no final component to name the transfer after.
@@ -2006,11 +2014,17 @@ pub async fn send_file(
         buf.extend_from_slice(&local_nonce);
         buf
     } else if let Some(ref kp) = local_kp {
-        let mut buf = Vec::with_capacity(1 + 32 + 16);
-        buf.push(0x01); // flags: encrypted
-        buf.extend_from_slice(&kp.public);
-        buf.extend_from_slice(&local_nonce);
-        buf
+        // The identity signs the ephemeral key and nonce this HELLO
+        // carries, binding "who I am" to "the key this session derives
+        // from". Appended after the fixed prefix, so a daemon that predates
+        // this reads the same 49 bytes it always did and ignores the rest.
+        let offer = client_identity
+            .map(|id| (id.public_bytes(), id.sign_client_offer(&kp.public, &local_nonce)));
+        ahp_proto::hello::encode_hello_full(
+            &kp.public,
+            &local_nonce,
+            offer.as_ref().map(|(pk, sig)| (pk, sig)),
+        )
     } else {
         vec![0x00] // flags: plaintext
     };
@@ -2059,7 +2073,7 @@ pub async fn send_file(
     let busy_deadline = Instant::now() + BUSY_WAIT_MAX;
     loop {
         send_ctrl(&socket, remote, PacketType::Hello, conn_id, seq, &hello_payload).await?;
-        match recv_ctrl_typed(&socket, &mut recv_buf, PacketType::HelloAck, Duration::from_secs(2)).await {
+        match recv_hello_ack_or_refusal(&socket, &mut recv_buf, Duration::from_secs(2)).await {
             Ok(pkt) => {
                 let busy = decode_hello_ack_payload(&pkt.payload)
                     .map(|a| a.data_port.is_none())
@@ -2087,6 +2101,11 @@ a time; retry when it is free",
                 hello_ack_pkt = pkt;
                 break;
             }
+            // A refusal is final. Retrying it would hang the client for the
+            // whole handshake budget and then report a timeout, which points
+            // at the network rather than at the policy that actually stopped
+            // the transfer.
+            Err(e) if e.to_string() == PEER_REFUSED => return Err(e),
             Err(_) if attempt + 1 < HELLO_ATTEMPTS => {
                 attempt += 1;
                 tracing::debug!(attempt, "HELLO timeout, retrying");
@@ -2117,6 +2136,26 @@ a time; retry when it is free",
     // A count rather than a list of ports, because the daemon has to publish
     // this in HELLO_ACK, before our MANIFEST tells it how many streams there
     // will be. Taking the minimum of the two is our side of that bargain.
+    // Were we actually checked?
+    //
+    // The identity is appended to HELLO in a way older daemons ignore by
+    // design, so "the transfer succeeded" is not evidence that anybody
+    // looked at it. The capability bit is the only thing that distinguishes
+    // a daemon that authenticated this client from one that has never heard
+    // of client authentication — and a client that asked to be
+    // authenticated must not proceed on the second.
+    if require_peer_auth
+        && hello_ack.capabilities & ahp_proto::hello::CAP_PEER_AUTH == 0
+    {
+        return Err(
+            "--require-peer-auth was given but the daemon did not confirm it checked this \
+             client: it is either older than peer authentication or has no peer policy \
+             configured (--allow-peer / --require-peer-auth). Aborting rather than \
+             transferring unauthenticated."
+                .into(),
+        );
+    }
+
     let advertised_data_ports = ahp_proto::data_port_count(hello_ack.capabilities);
     // `FAVONIUS_PER_STREAM_PORTS=0` declines the run: same binary, same
     // daemon, one socket — which is the control arm this is measured
@@ -4294,6 +4333,47 @@ async fn recv_ctrl(
 }
 
 /// Receive a specific packet type, ignoring all others until timeout.
+/// Wait for a HELLO_ACK, treating a bare ERROR from the daemon as a final
+/// refusal rather than as noise to retry through.
+///
+/// `recv_ctrl_typed` deliberately ignores packets it was not waiting for —
+/// stale data, probes — which is right everywhere else and wrong here: a
+/// daemon that has decided this sender may not write says so once, and
+/// retrying makes the client hang for the full handshake budget before
+/// failing with a timeout that names the wrong problem.
+///
+/// The ERROR carries no reason. What went wrong is in the daemon's log,
+/// where the operator of *that* machine can read it; putting it on the wire
+/// would let anyone probe the allowlist by watching which explanation came
+/// back.
+async fn recv_hello_ack_or_refusal(
+    socket: &UdpSocket,
+    buf: &mut [u8],
+    timeout: Duration,
+) -> Result<Packet, Box<dyn std::error::Error + Send + Sync>> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err("timeout waiting for HelloAck".into());
+        }
+        let (len, _) = tokio::time::timeout(remaining, socket.recv_from(buf)).await??;
+        if let Ok(pkt) = decode_packet(&buf[..len]) {
+            match pkt.header.packet_type {
+                PacketType::HelloAck => return Ok(pkt),
+                PacketType::Error => return Err(PEER_REFUSED.into()),
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Marker for a refusal, so the retry loop can tell it from a timeout.
+/// Compared by identity of the message, which is why it is a constant.
+const PEER_REFUSED: &str = "the daemon refused this transfer before it began: it did not \
+accept this sender. If it runs --require-peer-auth or --allow-peer, send with --identity \
+using a key it permits; its log says which check failed.";
+
 async fn recv_ctrl_typed(
     socket: &UdpSocket,
     buf: &mut [u8],
@@ -5310,6 +5390,8 @@ mod tests {
                 None,
                 false,
                 None,
+                None,
+                false,
             )
             .await;
             let err = match result {
