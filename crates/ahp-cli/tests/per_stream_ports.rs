@@ -147,6 +147,7 @@ async fn transfer(
             header_protect,
             None,
             None,
+            None,
             false,
         ),
     )
@@ -241,7 +242,7 @@ async fn per_stream_ports_transfer_every_byte() {
                 daemon.control, &source, dest.to_str().unwrap(),
                 None, // auto
                 AckMode::Bitmap, 4, "auto", false, CompressionProfile::None,
-                false, None, false, None, None, false,
+                false, None, false, None, None, None, false,
             ),
         )
         .await
@@ -317,7 +318,7 @@ async fn more_senders_than_sockets_all_complete() {
                     send_file(
                         control, &src, dest.to_str().unwrap(),
                         Some(CongestionProfile::Classic), AckMode::Bitmap, 2, "auto",
-                        false, CompressionProfile::None, false, None, false, None, None, false,
+                        false, CompressionProfile::None, false, None, false, None, None, None, false,
                     ),
                 )
                 .await

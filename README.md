@@ -21,8 +21,9 @@ move files in production, read [SECURITY.md](SECURITY.md) first and expect
   header protection, 0-RTT resume (`--encrypt`); optional Ed25519 server
   authentication (`--server-key`)
 - **Authenticated senders** — a daemon can accept only the senders it has
-  been given the keys for, and refuse anonymous ones (`--allow-peer`,
-  `--require-peer-auth`); see
+  been given the keys for, refuse anonymous ones, and take signed expiring
+  grants scoped to one directory (`--allow-peer`, `--require-peer-auth`,
+  `--trust-anchor`); see
   [Who may send to a daemon](#who-may-send-to-a-daemon)
 - **Compressed** — per-chunk zstd with a per-packet flag
   (`--compression balanced`)
@@ -234,6 +235,55 @@ authenticated.
 read nothing, so a sender configured with one still transfers to a daemon
 that has never heard of client authentication. Verified against a
 pre-existing daemon binary, not only in tests.
+
+### Narrower, expiring permissions
+
+`--allow-peer` says *this sender may write here*, and keeps saying it until
+somebody edits the configuration. Where permissions are handed out per job,
+that is the wrong granularity. A **grant** is the narrower statement — this
+sender, into this directory, until this time — signed by a key the daemon
+was told to trust:
+
+```bash
+# Once: a signing key. Its public half is the anchor daemons are given.
+favonius-daemon keygen --output anchor.key
+favonius-daemon pubkey --identity anchor.key          # prints the anchor
+
+# Per job: issue a grant. Prints hex to hand to the sender.
+favonius-daemon grant --anchor anchor.key \
+    --source <sender pubkey> --destination <daemon pubkey> \
+    --prefix /srv/in/nightly --run-id job-42 --ttl-secs 300
+
+# The daemon accepts grants from that anchor, and requires one
+favonius-daemon --dest-root /srv/in --identity daemon.key \
+    --trust-anchor <anchor pubkey> --require-grant
+
+# The sender presents it
+favonius send big.tar "host:7801:/srv/in/nightly/big.tar" \
+    --encrypt --identity sender.key --grant <hex or file>
+```
+
+A grant names the sender it is for, the **daemon** it is for, a path prefix
+and an expiry, and the daemon checks all four offline — no callback, no
+directory service. Naming the daemon matters: without it, a permission to
+write to one machine would be accepted by every machine trusting the same
+anchor. Expiry is the only revocation here; a grant cannot be recalled, it
+runs out, which is why the default TTL is minutes.
+
+`--trust-anchor` may be repeated, and that is what makes rotating the
+signing key possible without a flag day: publish the new anchor, let daemons
+accept both, switch issuance, then drop the retired one.
+
+`--require-grant` implies `--require-peer-auth`, because a grant names its
+bearer and demanding one from a sender that proved nothing would be
+demanding a document nobody checked the bearer of.
+
+**0-RTT resume is refused while any of this is in force.** A resumed session
+carries no identity and no grant, so honouring one would let a sender
+authorised for five minutes and one directory keep writing anywhere under
+`--dest-root` for as long as its ticket lived. Such daemons do not issue
+tickets either, so senders never attempt a reconnection that would be
+rejected.
 
 **Two limits worth knowing.** `--require-peer-auth` disables the TCP
 fallback, which has no handshake and therefore no way to authenticate

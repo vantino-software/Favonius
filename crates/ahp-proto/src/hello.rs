@@ -193,6 +193,7 @@ pub fn encode_hello_full(
     ephemeral_pub: &[u8; 32],
     nonce: &[u8; 16],
     peer_auth: Option<(&[u8; 32], &[u8; 64])>,
+    grant: Option<&[u8]>,
 ) -> Vec<u8> {
     let mut buf = Vec::with_capacity(HELLO_FULL_DH_LEN + PEER_AUTH_LEN);
     buf.push(HELLO_FULL_DH);
@@ -201,12 +202,21 @@ pub fn encode_hello_full(
     if let Some((identity_pub, signature)) = peer_auth {
         buf.extend_from_slice(identity_pub);
         buf.extend_from_slice(signature);
+        // Length-prefixed, and only ever after auth material: a grant names
+        // the sender it is for, so one arriving without a proven identity
+        // could not be checked against anything and has no meaning. The
+        // encoder refuses to produce that shape rather than leaving the
+        // decoder to decide what it would mean.
+        if let Some(grant) = grant {
+            buf.extend_from_slice(&(grant.len() as u16).to_be_bytes());
+            buf.extend_from_slice(grant);
+        }
     }
     buf
 }
 
 /// A parsed full-DH HELLO.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelloFull {
     pub ephemeral_pub: [u8; 32],
     pub nonce: [u8; 16],
@@ -214,6 +224,11 @@ pub struct HelloFull {
     /// Absent means the client did not authenticate — which is every client
     /// built before this existed, and is not by itself an error.
     pub peer_auth: Option<([u8; 32], [u8; 64])>,
+    /// An opaque signed permission, when the client presented one. This
+    /// crate does not interpret it: parsing and checking belong to whatever
+    /// holds the trust anchors, and a wire format that understood the
+    /// contents would have to be revised every time they changed.
+    pub grant: Option<Vec<u8>>,
 }
 
 /// Decode a full-DH HELLO payload. `None` when it is not one, or is short.
@@ -232,16 +247,31 @@ pub fn decode_hello_full(payload: &[u8]) -> Option<HelloFull> {
     nonce.copy_from_slice(&payload[33..HELLO_FULL_DH_LEN]);
 
     let auth_end = HELLO_FULL_DH_LEN + PEER_AUTH_LEN;
-    let peer_auth = if payload.len() >= auth_end {
+    let mut peer_auth = None;
+    let mut grant = None;
+    if payload.len() >= auth_end {
         let mut identity_pub = [0u8; 32];
         identity_pub.copy_from_slice(&payload[HELLO_FULL_DH_LEN..HELLO_FULL_DH_LEN + 32]);
         let mut signature = [0u8; 64];
         signature.copy_from_slice(&payload[HELLO_FULL_DH_LEN + 32..auth_end]);
-        Some((identity_pub, signature))
-    } else {
-        None
-    };
-    Some(HelloFull { ephemeral_pub, nonce, peer_auth })
+        peer_auth = Some((identity_pub, signature));
+
+        // A grant, if one follows. A truncated or over-long length reads as
+        // "no grant" rather than as an error: this is an append point, and a
+        // decoder that rejected what it could not fully parse would make the
+        // next extension a breaking change. A daemon that requires a grant
+        // refuses the absence, which is where that decision belongs.
+        if let Some(len_bytes) = payload.get(auth_end..auth_end + 2) {
+            let len = u16::from_be_bytes([len_bytes[0], len_bytes[1]]) as usize;
+            let start = auth_end + 2;
+            if let Some(bytes) = payload.get(start..start + len) {
+                if len > 0 {
+                    grant = Some(bytes.to_vec());
+                }
+            }
+        }
+    }
+    Some(HelloFull { ephemeral_pub, nonce, peer_auth, grant })
 }
 
 /// Magic + bitfield.
@@ -641,8 +671,8 @@ mod tests {
     /// reads out of an unauthenticated one.
     #[test]
     fn appending_client_auth_does_not_disturb_the_fixed_prefix() {
-        let plain = encode_hello_full(&EPH, &HN, None);
-        let authed = encode_hello_full(&EPH, &HN, Some((&CID, &CSIG)));
+        let plain = encode_hello_full(&EPH, &HN, None, None);
+        let authed = encode_hello_full(&EPH, &HN, Some((&CID, &CSIG)), None);
 
         assert_eq!(plain.len(), HELLO_FULL_DH_LEN);
         assert_eq!(
@@ -658,7 +688,7 @@ mod tests {
 
     #[test]
     fn client_auth_round_trips() {
-        let buf = encode_hello_full(&EPH, &HN, Some((&CID, &CSIG)));
+        let buf = encode_hello_full(&EPH, &HN, Some((&CID, &CSIG)), None);
         let got = decode_hello_full(&buf).expect("decodes");
         assert_eq!(got.ephemeral_pub, EPH);
         assert_eq!(got.nonce, HN);
@@ -669,7 +699,7 @@ mod tests {
     fn an_unauthenticated_hello_reports_no_peer_auth() {
         // The negative control: without it the test above passes for a
         // decoder that invents auth material.
-        let buf = encode_hello_full(&EPH, &HN, None);
+        let buf = encode_hello_full(&EPH, &HN, None, None);
         assert_eq!(decode_hello_full(&buf).expect("decodes").peer_auth, None);
     }
 
@@ -678,7 +708,7 @@ mod tests {
         // A half-written append must never decode into a partial identity
         // that then fails verification for the wrong reason — or worse,
         // matches something.
-        let mut buf = encode_hello_full(&EPH, &HN, Some((&CID, &CSIG)));
+        let mut buf = encode_hello_full(&EPH, &HN, Some((&CID, &CSIG)), None);
         buf.truncate(HELLO_FULL_DH_LEN + 40);
         assert_eq!(decode_hello_full(&buf).expect("decodes").peer_auth, None);
     }
@@ -688,7 +718,7 @@ mod tests {
         assert!(decode_hello_full(&[]).is_none());
         assert!(decode_hello_full(&[0x00]).is_none());
         // Right flag, one byte short of the fixed prefix.
-        let mut buf = encode_hello_full(&EPH, &HN, None);
+        let mut buf = encode_hello_full(&EPH, &HN, None, None);
         buf.truncate(HELLO_FULL_DH_LEN - 1);
         assert!(decode_hello_full(&buf).is_none());
     }
@@ -702,5 +732,59 @@ mod tests {
         let both = per_stream_ports(4) | CAP_PEER_AUTH;
         assert_eq!(data_port_count(both), 4, "the count survives the new bit");
         assert!(both & CAP_PEER_AUTH != 0);
+    }
+
+    // ── HELLO carrying a grant ────────────────────────────────────────────
+
+    #[test]
+    fn a_grant_round_trips_after_the_auth_material() {
+        let grant = b"opaque signed permission".to_vec();
+        let buf = encode_hello_full(&EPH, &HN, Some((&CID, &CSIG)), Some(&grant));
+        let got = decode_hello_full(&buf).expect("decodes");
+        assert_eq!(got.peer_auth, Some((CID, CSIG)));
+        assert_eq!(got.grant.as_deref(), Some(&grant[..]));
+    }
+
+    #[test]
+    fn a_grant_does_not_disturb_what_older_peers_read() {
+        // The same compatibility property as the auth append, one layer out:
+        // a daemon that predates grants reads the fixed prefix, then the
+        // auth material it does understand, and ignores the rest.
+        let grant = b"opaque".to_vec();
+        let with = encode_hello_full(&EPH, &HN, Some((&CID, &CSIG)), Some(&grant));
+        let without = encode_hello_full(&EPH, &HN, Some((&CID, &CSIG)), None);
+        assert_eq!(&with[..without.len()], &without[..]);
+        let older_view = decode_hello_full(&without).expect("decodes");
+        assert_eq!(older_view.peer_auth, Some((CID, CSIG)));
+        assert_eq!(older_view.grant, None);
+    }
+
+    #[test]
+    fn a_grant_without_auth_material_is_never_encoded() {
+        // A grant names the sender it is for. Without a proven identity
+        // there is nothing to check it against, so the shape is refused at
+        // the encoder rather than left for a decoder to interpret.
+        let grant = b"opaque".to_vec();
+        let buf = encode_hello_full(&EPH, &HN, None, Some(&grant));
+        assert_eq!(buf.len(), HELLO_FULL_DH_LEN);
+        assert_eq!(decode_hello_full(&buf).expect("decodes").grant, None);
+    }
+
+    #[test]
+    fn a_truncated_grant_reads_as_absent_not_as_a_short_grant() {
+        // A half-arrived grant must not verify against anything. Absent is
+        // the safe reading: a daemon requiring one refuses.
+        let grant = b"opaque signed permission".to_vec();
+        let mut buf = encode_hello_full(&EPH, &HN, Some((&CID, &CSIG)), Some(&grant));
+        buf.truncate(buf.len() - 4);
+        let got = decode_hello_full(&buf).expect("decodes");
+        assert_eq!(got.peer_auth, Some((CID, CSIG)), "auth survives");
+        assert_eq!(got.grant, None, "a partial grant was surfaced");
+    }
+
+    #[test]
+    fn a_zero_length_grant_is_absent() {
+        let buf = encode_hello_full(&EPH, &HN, Some((&CID, &CSIG)), Some(&[]));
+        assert_eq!(decode_hello_full(&buf).expect("decodes").grant, None);
     }
 }

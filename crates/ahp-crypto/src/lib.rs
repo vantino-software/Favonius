@@ -15,6 +15,7 @@ pub mod key_schedule;
 pub mod key_update;
 pub mod packet_protection;
 pub mod session_ticket;
+pub mod grant;
 pub mod signatures;
 
 use bytes::Bytes;

@@ -82,6 +82,24 @@ struct Args {
     #[arg(long = "allow-peer")]
     allow_peer: Vec<String>,
 
+    /// A public key whose signature makes a grant worth reading: 64 hex
+    /// characters, or a file containing them. Repeat to accept more than
+    /// one.
+    ///
+    /// More than one is what makes rotating the issuing key possible
+    /// without a flag day: accept both while the change is rolled out, then
+    /// drop the retired one.
+    #[arg(long = "trust-anchor")]
+    trust_anchor: Vec<String>,
+
+    /// Require a valid grant, not merely a known sender.
+    ///
+    /// Implies --require-peer-auth: a grant names the sender it was issued
+    /// for, so demanding one from a sender that proved no identity would be
+    /// demanding a document nobody checked the bearer of.
+    #[arg(long)]
+    require_grant: bool,
+
     /// Refuse senders that do not authenticate.
     ///
     /// Off by default: turning it on by default would stop every existing
@@ -100,6 +118,47 @@ enum Command {
         #[arg(long, default_value = "favonius-identity.key")]
         output: std::path::PathBuf,
     },
+    /// Print the public key of an existing identity file
+    ///
+    /// `keygen` prints it once, at creation. This answers the same question
+    /// later, which is when it is usually asked: an operator filling in
+    /// `--allow-peer` or `--trust-anchor` on another machine has the key
+    /// file and not the terminal it was created in.
+    Pubkey {
+        #[arg(long)]
+        identity: std::path::PathBuf,
+    },
+    /// Issue a signed grant permitting one sender to write one place
+    ///
+    /// A grant is what lets something outside this daemon hand out narrow,
+    /// expiring permissions without that thing having to speak the wire
+    /// protocol or link this code: it invokes this subcommand and passes the
+    /// hex to the sender.
+    Grant {
+        /// Identity key file to sign with. Its public key is what daemons
+        /// must be given as `--trust-anchor`.
+        #[arg(long)]
+        anchor: std::path::PathBuf,
+        /// Public key of the sender this grant is for (hex or a file).
+        #[arg(long)]
+        source: String,
+        /// Public key of the daemon this grant is for (hex or a file).
+        #[arg(long)]
+        destination: String,
+        /// Absolute path prefix the sender may write under.
+        #[arg(long)]
+        prefix: String,
+        /// Free-form identifier recorded in the grant and logged by the
+        /// daemon that accepts it.
+        #[arg(long, default_value = "")]
+        run_id: String,
+        /// How long the grant is valid, in seconds.
+        ///
+        /// Short by default, because expiry is the only revocation this
+        /// design has: a grant cannot be recalled, it can only run out.
+        #[arg(long, default_value_t = 300)]
+        ttl_secs: u64,
+    },
 }
 
 #[tokio::main]
@@ -113,6 +172,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         )
         .with_target(true)
         .init();
+
+    if let Some(Command::Pubkey { identity }) = &args.command {
+        let id = ahp_crypto::signatures::SigningIdentity::load_from_file(identity)?;
+        println!("{}", ahp_crypto::signatures::hex_encode(&id.public_bytes()));
+        return Ok(());
+    }
+
+    if let Some(Command::Grant { anchor, source, destination, prefix, run_id, ttl_secs }) =
+        &args.command
+    {
+        let anchor_key = ahp_crypto::signatures::SigningIdentity::load_from_file(anchor)?;
+        let source = ahp_crypto::signatures::parse_identity_pin(source)
+            .map_err(|e| format!("--source: {e}"))?;
+        let destination = ahp_crypto::signatures::parse_identity_pin(destination)
+            .map_err(|e| format!("--destination: {e}"))?;
+        if !std::path::Path::new(prefix).is_absolute() {
+            // A relative prefix would be compared against the absolute path
+            // the daemon resolved, and would never match — a grant that
+            // silently permits nothing is worse than one that is refused.
+            return Err(format!("--prefix {prefix} must be an absolute path").into());
+        }
+        let now = ahp_crypto::grant::now_unix();
+        if now == 0 {
+            return Err("this host's clock is unset, so a grant's expiry would be \
+                        meaningless; set the time before issuing grants"
+                .into());
+        }
+        let grant = ahp_crypto::grant::Grant {
+            source,
+            destination,
+            not_after: now + ttl_secs,
+            run_id: run_id.clone(),
+            path_prefix: prefix.clone(),
+        };
+        println!("{}", ahp_crypto::signatures::hex_encode(&grant.sign(&anchor_key)));
+        return Ok(());
+    }
 
     if let Some(Command::Keygen { output }) = &args.command {
         let identity = ahp_crypto::signatures::SigningIdentity::generate();
@@ -140,8 +236,41 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .map_err(|e| format!("--allow-peer {value}: {e}"))?,
         );
     }
-    let peer_policy =
-        ahp_daemon::peer_auth::PeerPolicy::new(allowed, args.require_peer_auth);
+    let mut anchors = Vec::with_capacity(args.trust_anchor.len());
+    for value in &args.trust_anchor {
+        anchors.push(
+            ahp_crypto::signatures::parse_identity_pin(value)
+                .map_err(|e| format!("--trust-anchor {value}: {e}"))?,
+        );
+    }
+    // A daemon that checks grants must know its own identity: a grant names
+    // the daemon it was issued for, and without that this one cannot tell a
+    // permission meant for it from one meant for another machine trusting
+    // the same anchor. Refused at startup rather than at 03:00.
+    if args.require_grant && identity.is_none() {
+        eprintln!(
+            "favonius-daemon: --require-grant needs --identity.\n\
+             \n\
+             A grant names the daemon it was issued for. Without an identity\n\
+             this daemon cannot tell a grant meant for it from one meant for\n\
+             another machine trusting the same anchor, so every grant would\n\
+             have to be accepted or refused blind."
+        );
+        std::process::exit(2);
+    }
+    if args.require_grant && anchors.is_empty() {
+        eprintln!(
+            "favonius-daemon: --require-grant needs at least one --trust-anchor;\n\
+             with none, no grant can ever verify and every transfer would be refused."
+        );
+        std::process::exit(2);
+    }
+    let peer_policy = ahp_daemon::peer_auth::PeerPolicy::new(allowed, args.require_peer_auth)
+        .with_trust_anchors(
+            anchors,
+            args.require_grant,
+            identity.as_ref().map(|i| i.public_bytes()),
+        );
 
     // Refuse to start in the configuration that hands an unauthenticated
     // peer arbitrary file write. Verified on 2026-08-11: with no
@@ -181,14 +310,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // anybody. Leaving it listening while the UDP path demands an identity
     // would publish a door with no lock beside a door with one — the
     // policy would be worth nothing, and worse, it would read as enforced.
-    if args.require_peer_auth && !args.no_tcp_fallback {
+    if (args.require_peer_auth || args.require_grant) && !args.no_tcp_fallback {
         tracing::warn!(
             "--require-peer-auth disables the TCP fallback: it has no handshake and \
              therefore no way to authenticate a sender. Transfers from clients whose \
              network drops UDP will fail until they can reach the UDP port."
         );
     }
-    if !args.no_tcp_fallback && !args.require_peer_auth {
+    if !args.no_tcp_fallback && !args.require_peer_auth && !args.require_grant {
         let fb_root = args.dest_root.clone();
         match tokio::net::TcpListener::bind(control_addr).await {
             Ok(l) => {

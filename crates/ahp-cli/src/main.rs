@@ -94,6 +94,12 @@ enum Command {
         /// is calling. Requires --encrypt.
         #[arg(long)]
         identity: Option<std::path::PathBuf>,
+        /// A signed permission to present to the daemon: hex, or a file
+        /// containing it. Issued by whatever holds the daemon's trust
+        /// anchor. Requires --identity, since a grant names the sender it
+        /// was issued for.
+        #[arg(long)]
+        grant: Option<String>,
         /// Refuse to transfer unless the daemon confirms it authenticated
         /// this client. Without it, a daemon too old to understand the
         /// identity accepts the transfer and never says it ignored it.
@@ -242,7 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
 
-        Command::Send { source, destination, compression, congestion, ack_mode, streams, pacing, transport, encrypt, header_protect, resume, server_key, identity, require_peer_auth, adaptive, policy_path, include, exclude, dry_run, bandwidth_limit } => {
+        Command::Send { source, destination, compression, congestion, ack_mode, streams, pacing, transport, encrypt, header_protect, resume, server_key, identity, grant, require_peer_auth, adaptive, policy_path, include, exclude, dry_run, bandwidth_limit } => {
             // No code path reads this. It was destructured away with `..`,
             // so `--bandwidth-limit 10` capped nothing and said nothing —
             // the user asked for a rate limit and got line rate. Fail
@@ -364,6 +370,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     std::process::exit(2);
                 }
+                let grant_blob = match grant.as_deref() {
+                    Some(value) => match ahp_crypto::signatures::parse_hex_blob(value) {
+                        Ok(b) => Some(b),
+                        Err(e) => { eprintln!("Error: --grant {e}"); std::process::exit(2); }
+                    },
+                    None => None,
+                };
+                // A grant travels appended to the identity that it names, so
+                // one without an identity would arrive unattached to anyone
+                // and be ignored — silently, which is the failure worth
+                // refusing outright.
+                if grant_blob.is_some() && client_identity.is_none() {
+                    eprintln!(
+                        "Error: --grant needs --identity: a grant names the sender it was \
+                         issued for, and the daemon checks it against the identity that \
+                         authenticated."
+                    );
+                    std::process::exit(2);
+                }
                 if client_identity.is_some() && !encrypt {
                     eprintln!(
                         "Error: --identity needs --encrypt: the identity is presented inside \
@@ -446,7 +471,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let failed = run_ahp_sends(
                     remote_addr, &items, cc_profile, ack, streams, &pacing, encrypt,
                     compress_profile, resume, adaptive_policy.as_mut(), header_protect,
-                    pinned_key, client_identity.as_ref(), require_peer_auth,
+                    pinned_key, client_identity.as_ref(), grant_blob.as_deref(),
+                    require_peer_auth,
                 ).await;
                 if failed > 0 {
                     eprintln!("{failed} of {} transfer(s) failed.", items.len());
@@ -642,7 +668,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // unauthenticated rather than half-authenticated. A
                     // daemon running --require-peer-auth will refuse it.
                     remote_addr, &items, cc_profile, AckMode::Bitmap, streams, "auto",
-                    encrypt, compress_profile, false, None, false, None, None, false,
+                    encrypt, compress_profile, false, None, false, None, None, None, false,
                 ).await;
             }
 
@@ -843,6 +869,7 @@ async fn run_ahp_sends(
     header_protect: bool,
     pinned_key: Option<[u8; 32]>,
     client_identity: Option<&ahp_crypto::signatures::SigningIdentity>,
+    grant: Option<&[u8]>,
     require_peer_auth: bool,
 ) -> usize {
     let multi = items.len() > 1;
@@ -857,7 +884,7 @@ async fn run_ahp_sends(
         match net_sender::send_file(
             remote_addr, src, dst, cc_profile, ack, streams, pacing, encrypt,
             compress_profile, resume, adaptive_policy.as_deref(), header_protect, pinned_key,
-            client_identity, require_peer_auth,
+            client_identity, grant, require_peer_auth,
         ).await {
             Ok(stats) => {
                 sent_bytes += stats.bytes_sent;
