@@ -79,6 +79,39 @@ impl SigningIdentity {
         self.sign(&transcript)
     }
 
+    /// Sign this end's *offer*: the ephemeral key and nonce it is about to
+    /// put on the wire, bound to this identity.
+    ///
+    /// A client cannot sign the full transcript the way the daemon does.
+    /// The daemon signs in HELLO_ACK, by which point it has seen both
+    /// halves; the client sends HELLO first and has not yet seen the
+    /// daemon's ephemeral key or nonce. Signing half a transcript is the
+    /// only thing available without adding a round trip.
+    ///
+    /// That is weaker in one specific way and not in another, and the
+    /// difference is worth being exact about:
+    ///
+    /// - **It does not prove freshness.** The same signature is valid
+    ///   forever, so anyone who captures a HELLO can replay it.
+    /// - **It still binds identity to the ephemeral key**, which is what
+    ///   authorisation actually rests on. Session keys are derived from
+    ///   that ephemeral, so a replayer who lacks its private half derives
+    ///   nothing, cannot produce a valid encrypted packet, and therefore
+    ///   cannot write a file. A replay costs the daemon a session it will
+    ///   drop, not a byte on disk.
+    ///
+    /// The domain tag differs from the full-transcript one deliberately: a
+    /// signature made for one purpose must never verify for the other, or
+    /// an offer signature could be presented as proof of a completed
+    /// handshake.
+    pub fn sign_client_offer(
+        &self,
+        ephemeral_pub: &[u8; 32],
+        nonce: &[u8],
+    ) -> [u8; 64] {
+        self.sign(&build_client_offer_transcript(ephemeral_pub, nonce))
+    }
+
     /// Load an identity from a key file (see [`IDENTITY_FILE_MAGIC`]).
     pub fn load_from_file(path: &std::path::Path) -> Result<Self, String> {
         let contents = std::fs::read_to_string(path)
@@ -123,6 +156,38 @@ impl SigningIdentity {
 /// First line of an identity key file — a versioned plain-text format:
 /// line 1 is this magic, line 2 is the 32-byte secret as 64 hex characters.
 pub const IDENTITY_FILE_MAGIC: &str = "FAVONIUS-IDENTITY-V1";
+
+/// Parse a public identity given either as 64 hex characters or as a path
+/// to a file containing them.
+///
+/// Both spellings exist because both are what people actually have: the hex
+/// is what `keygen` prints and what fits on a command line, and the file is
+/// what configuration management writes. Accepting only one pushes the
+/// other into shell quoting or a temporary file.
+///
+/// A value that looks like hex is read as hex; anything else is read as a
+/// path. That ordering matters: a 64-character *filename* made only of hex
+/// digits would be taken for a key, which is a strange enough file to own
+/// that preferring the key is the safer reading.
+pub fn parse_identity_pin(value: &str) -> Result<[u8; 32], String> {
+    let trimmed = value.trim();
+    let hex = if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        trimmed.to_string()
+    } else {
+        std::fs::read_to_string(trimmed)
+            .map_err(|e| {
+                format!("{trimmed} is neither a 64-character hex key nor a readable file ({e})")
+            })?
+            .trim()
+            .to_string()
+    };
+    let bytes = hex_decode(&hex)
+        .filter(|b| b.len() == 32)
+        .ok_or_else(|| format!("{trimmed} does not contain a 32-byte hex Ed25519 public key"))?;
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&bytes);
+    Ok(out)
+}
 
 /// Hex-encode helper (no external dep).
 pub fn hex_encode(bytes: &[u8]) -> String {
@@ -177,6 +242,18 @@ impl VerifyingKeyRef {
             .map_err(|_| CryptoError::SignatureInvalid)
     }
 
+    /// Verify a peer's *offer* signature — see
+    /// [`SigningIdentity::sign_client_offer`] for what it does and does not
+    /// prove.
+    pub fn verify_client_offer(
+        &self,
+        ephemeral_pub: &[u8; 32],
+        nonce: &[u8],
+        signature: &[u8; 64],
+    ) -> Result<(), CryptoError> {
+        self.verify(&build_client_offer_transcript(ephemeral_pub, nonce), signature)
+    }
+
     /// Verify a handshake transcript signature from the peer.
     ///
     /// Note: the local/remote order is swapped relative to the signer — the
@@ -228,6 +305,23 @@ fn build_handshake_transcript(
     transcript.extend_from_slice(local_nonce);
     transcript.extend_from_slice(&(remote_nonce.len() as u16).to_le_bytes());
     transcript.extend_from_slice(remote_nonce);
+    transcript
+}
+
+/// Transcript for a one-sided offer signature.
+///
+/// Deliberately *not* the same shape as the full handshake transcript, and
+/// deliberately a different domain tag: the two are signed by different
+/// parties at different points and must never be interchangeable. A shared
+/// tag would let an offer signature be replayed as a handshake signature
+/// over a transcript an attacker chose the other half of.
+fn build_client_offer_transcript(ephemeral_pub: &[u8; 32], nonce: &[u8]) -> Vec<u8> {
+    let mut transcript =
+        Vec::with_capacity(b"AHP-CLIENT-OFFER-SIG-v1".len() + 32 + 2 + nonce.len());
+    transcript.extend_from_slice(b"AHP-CLIENT-OFFER-SIG-v1");
+    transcript.extend_from_slice(ephemeral_pub);
+    transcript.extend_from_slice(&(nonce.len() as u16).to_le_bytes());
+    transcript.extend_from_slice(nonce);
     transcript
 }
 
@@ -476,6 +570,60 @@ mod tests {
         assert!(SigningIdentity::load_from_file(&short).is_err());
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_client_offer_verifies_against_the_signer() {
+        let id = SigningIdentity::generate();
+        let eph = [7u8; 32];
+        let nonce = [9u8; 16];
+        let sig = id.sign_client_offer(&eph, &nonce);
+        assert!(id.verifying_key().verify_client_offer(&eph, &nonce, &sig).is_ok());
+    }
+
+    #[test]
+    fn a_client_offer_does_not_verify_for_another_identity() {
+        let id = SigningIdentity::generate();
+        let other = SigningIdentity::generate();
+        let (eph, nonce) = ([7u8; 32], [9u8; 16]);
+        let sig = id.sign_client_offer(&eph, &nonce);
+        assert!(other.verifying_key().verify_client_offer(&eph, &nonce, &sig).is_err());
+    }
+
+    #[test]
+    fn a_client_offer_is_bound_to_its_ephemeral_key_and_nonce() {
+        // This binding is the whole security argument: an attacker who
+        // replays the signature with a different ephemeral key must fail,
+        // because the ephemeral is what session keys derive from.
+        let id = SigningIdentity::generate();
+        let (eph, nonce) = ([7u8; 32], [9u8; 16]);
+        let sig = id.sign_client_offer(&eph, &nonce);
+        let vk = id.verifying_key();
+        assert!(vk.verify_client_offer(&[8u8; 32], &nonce, &sig).is_err(), "ephemeral not bound");
+        assert!(vk.verify_client_offer(&eph, &[10u8; 16], &sig).is_err(), "nonce not bound");
+    }
+
+    #[test]
+    fn an_offer_signature_is_not_a_handshake_signature() {
+        // Domain separation. Without distinct tags, a one-sided offer
+        // signature could be presented as proof of a completed two-sided
+        // handshake — the peer's half chosen by whoever is replaying it.
+        let id = SigningIdentity::generate();
+        let (eph, nonce) = ([7u8; 32], [9u8; 16]);
+
+        let offer = id.sign_client_offer(&eph, &nonce);
+        assert!(
+            id.verifying_key()
+                .verify_handshake(&eph, &eph, &nonce, &nonce, &offer)
+                .is_err(),
+            "an offer signature verified as a handshake signature"
+        );
+
+        let handshake = id.sign_handshake(&eph, &eph, &nonce, &nonce);
+        assert!(
+            id.verifying_key().verify_client_offer(&eph, &nonce, &handshake).is_err(),
+            "a handshake signature verified as an offer signature"
+        );
     }
 
     #[test]

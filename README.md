@@ -20,6 +20,10 @@ move files in production, read [SECURITY.md](SECURITY.md) first and expect
 - **Encrypted** — AES-256-GCM with X25519 key exchange, key rotation,
   header protection, 0-RTT resume (`--encrypt`); optional Ed25519 server
   authentication (`--server-key`)
+- **Authenticated senders** — a daemon can accept only the senders it has
+  been given the keys for, and refuse anonymous ones (`--allow-peer`,
+  `--require-peer-auth`); see
+  [Who may send to a daemon](#who-may-send-to-a-daemon)
 - **Compressed** — per-chunk zstd with a per-packet flag
   (`--compression balanced`)
 - **Resumable** — a Merkle tree diff skips unchanged chunks (`--resume`)
@@ -184,6 +188,58 @@ favonius send secret.tar.gz "host:7801:/path" --encrypt --header-protect
 - **Header protection** (`--header-protect`): AES-128-ECB mask over connection_id + packet_number fields, preventing on-path traffic correlation (QUIC-inspired, RFC 9001 &sect;5.4)
 - **0-RTT session resumption**: daemon issues encrypted session ticket after transfer; on reconnect, the client presents the ticket to skip the DH handshake entirely
 - **Server authentication**: the daemon can sign each full handshake with an Ed25519 identity key (`favonius-daemon --identity`, generate via `favonius-daemon keygen`); the sender pins the public key with `--server-key` (64 hex chars or a file) and aborts on mismatch. Without a pin the encrypted handshake is anonymous (unauthenticated DH).
+- **Client authentication**: the sender can prove who it is with `--identity`, and the daemon can insist on it. See below.
+
+## Who may send to a daemon
+
+`--dest-root` confines *where* an incoming transfer may write. It does not
+decide *whether a stranger may write at all* — by default, any host that can
+reach the control port can. These flags answer that second question.
+
+```bash
+# On the sender: generate an identity and use it
+favonius-daemon keygen --output sender.key      # same file format both ends
+favonius send big.tar "host:7801:/srv/in/big.tar" --encrypt --identity sender.key
+
+# On the receiver: accept only known senders, and refuse anonymous ones
+favonius-daemon --dest-root /srv/in --identity daemon.key \
+    --allow-peer 6bae3f7b…  --allow-peer 9c41a0d2…  --require-peer-auth
+```
+
+- `--identity <file>` (sender) presents an Ed25519 public key and a signature
+  over the ephemeral key this handshake uses. Requires `--encrypt`: the
+  identity travels inside the encrypted handshake.
+- `--allow-peer <hex|file>` (daemon, repeatable) is the list of senders
+  permitted to write here. With no `--allow-peer`, any sender that
+  authenticates is accepted.
+- `--require-peer-auth` (daemon) refuses senders that present no identity.
+  **This is what turns `--dest-root` from "a stranger may only overwrite
+  things under here" into "a stranger may not write."**
+- `--require-peer-auth` (sender) refuses to transfer unless the daemon
+  confirms it checked. Without it, a daemon that predates client
+  authentication accepts the transfer and never mentions that it ignored the
+  identity — so the sender would have no way to tell.
+
+A refused sender is told only that it was refused; which check failed is in
+the daemon's log, on the machine whose operator set the policy.
+
+**Migrating an estate**: set `--allow-peer` first and leave
+`--require-peer-auth` off. Authenticated senders are then checked against
+the list while unauthenticated ones still work, so the list can be
+populated and verified before it starts turning anybody away. Add
+`--require-peer-auth` once the log shows every expected sender arriving
+authenticated.
+
+**Compatibility.** The identity is appended to HELLO where older daemons
+read nothing, so a sender configured with one still transfers to a daemon
+that has never heard of client authentication. Verified against a
+pre-existing daemon binary, not only in tests.
+
+**Two limits worth knowing.** `--require-peer-auth` disables the TCP
+fallback, which has no handshake and therefore no way to authenticate
+anyone — leaving it listening would publish a door with no lock beside one
+with a lock. And `favonius sync` carries neither `--server-key` nor
+`--identity` today, so a daemon requiring authentication will refuse it.
 
 ## Compression
 

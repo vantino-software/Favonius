@@ -98,7 +98,7 @@ async fn start_daemon(data_ports: u16) -> Option<Daemon> {
     let root = dest_root.clone();
     tokio::spawn(async move {
         let _ = ahp_daemon::net_receiver::run_protocol_listener(
-            control, data, 4, range, None, Some(root), None,
+            control, data, 4, range, None, Some(root), None, Default::default(),
         )
         .await;
     });
@@ -146,6 +146,8 @@ async fn transfer(
             None,
             header_protect,
             None,
+            None,
+            false,
         ),
     )
     .await
@@ -239,7 +241,7 @@ async fn per_stream_ports_transfer_every_byte() {
                 daemon.control, &source, dest.to_str().unwrap(),
                 None, // auto
                 AckMode::Bitmap, 4, "auto", false, CompressionProfile::None,
-                false, None, false, None,
+                false, None, false, None, None, false,
             ),
         )
         .await
@@ -315,7 +317,7 @@ async fn more_senders_than_sockets_all_complete() {
                     send_file(
                         control, &src, dest.to_str().unwrap(),
                         Some(CongestionProfile::Classic), AckMode::Bitmap, 2, "auto",
-                        false, CompressionProfile::None, false, None, false, None,
+                        false, CompressionProfile::None, false, None, false, None, None, false,
                     ),
                 )
                 .await

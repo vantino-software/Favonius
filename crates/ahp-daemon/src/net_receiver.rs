@@ -859,6 +859,7 @@ pub async fn run_protocol_listener(
     max_file_size: Option<u64>,
     dest_root: Option<std::path::PathBuf>,
     identity: Option<ahp_crypto::signatures::SigningIdentity>,
+    peer_policy: crate::peer_auth::PeerPolicy,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Canonicalize the confinement root once: it must exist, and the
     // canonical form is what lexical `starts_with` checks compare against.
@@ -1088,6 +1089,7 @@ split, about (concurrent transfers) x (streams per transfer)",
     // Shared, read-only, for the life of the daemon.
     let dest_root = dest_root.map(std::sync::Arc::new);
     let identity = std::sync::Arc::new(identity);
+    let peer_policy = std::sync::Arc::new(peer_policy);
     {
         let socket = socket.clone();
         let routes = routes.clone();
@@ -1250,6 +1252,7 @@ split, about (concurrent transfers) x (streams per transfer)",
             used_tickets.clone(),
             dest_root.clone(),
             identity.clone(),
+            peer_policy.clone(),
             free_data_socks.clone(),
         );
         let active_transfers = active_transfers.clone();
@@ -1296,6 +1299,7 @@ async fn run_transfer_slot(
     used_tickets: std::sync::Arc<std::sync::Mutex<ahp_crypto::session_ticket::UsedTicketCache>>,
     dest_root: Option<std::sync::Arc<std::path::PathBuf>>,
     identity: std::sync::Arc<Option<ahp_crypto::signatures::SigningIdentity>>,
+    peer_policy: std::sync::Arc<crate::peer_auth::PeerPolicy>,
     // Where to return the data socket. Returning it is what bounds the
     // daemon to its configured range; without it the pool drains and later
     // transfers fall back to the shared socket, silently reintroducing the
@@ -1325,6 +1329,7 @@ async fn run_transfer_slot(
             &used_tickets,
             dest_root.as_deref().map(|p| p.as_path()),
             identity.as_ref().as_ref(),
+            &peer_policy,
         ),
     )
     .await;
@@ -1892,6 +1897,7 @@ async fn handle_transfer(
     used_tickets: &std::sync::Arc<std::sync::Mutex<ahp_crypto::session_ticket::UsedTicketCache>>,
     dest_root: Option<&std::path::Path>,
     identity: Option<&ahp_crypto::signatures::SigningIdentity>,
+    peer_policy: &crate::peer_auth::PeerPolicy,
 ) -> Result<Option<(u64, SocketAddr)>, Box<dyn std::error::Error + Send + Sync>> {
     let mut seq: u64 = 0;
 
@@ -1901,7 +1907,16 @@ async fn handle_transfer(
     // arrive until the MANIFEST, which is read below. Advertising a *count*
     // from the port already in the ack is what lets the sender take the
     // minimum without a new field or a new packet type.
-    let capabilities = DAEMON_CAPABILITIES | ahp_proto::per_stream_ports(data_socks.len());
+    let mut capabilities =
+        DAEMON_CAPABILITIES | ahp_proto::per_stream_ports(data_socks.len());
+    // Say that this daemon understands the auth material a client may
+    // append, so a client requiring authentication can tell being *checked*
+    // from being silently ignored by a daemon too old to look. Advertised
+    // only when there is a policy to enforce: a daemon that accepts
+    // everyone has nothing to attest.
+    if peer_policy.is_enforcing() {
+        capabilities |= ahp_proto::hello::CAP_PEER_AUTH;
+    }
 
     // ── Key exchange + HELLO_ACK ─────────────────────────────────────────
     let hello_flag = if !hello_payload.is_empty() { hello_payload[0] } else { 0x00 };
@@ -1911,12 +1926,45 @@ async fn handle_transfer(
     // on mismatch instead of streaming data in a mode the daemon does not
     // expect (silent corruption / AEAD failures).
     let (session_keys, hello_ack_payload): (Option<ahp_crypto::SessionKeys>, Vec<u8>) =
-        if hello_flag == 0x01 && hello_payload.len() >= 1 + 32 + 16 {
+        if let Some(hello) = ahp_proto::hello::decode_hello_full(hello_payload) {
         // Full DH handshake.
-        let mut peer_public = [0u8; 32];
-        peer_public.copy_from_slice(&hello_payload[1..33]);
-        let mut peer_nonce = [0u8; 16];
-        peer_nonce.copy_from_slice(&hello_payload[33..49]);
+        let peer_public = hello.ephemeral_pub;
+        let peer_nonce = hello.nonce;
+
+        // Who is this, and may they write here? Decided before a key is
+        // derived or a socket is committed, so a refused sender costs
+        // nothing but the packet it sent.
+        let presented = hello.peer_auth.as_ref().map(|(id, sig)| (id, sig));
+        match peer_policy.decide(presented, &peer_public, &peer_nonce) {
+            crate::peer_auth::Decision::Authenticated(id) => {
+                tracing::info!(
+                    conn_id,
+                    peer = %peer,
+                    identity = %ahp_crypto::signatures::hex_encode(&id[..4]),
+                    "sender authenticated"
+                );
+            }
+            crate::peer_auth::Decision::Anonymous => {}
+            crate::peer_auth::Decision::Refused(why) => {
+                // Logged in full here, and nothing is sent back. A peer
+                // that failed authorisation learns only that it got no
+                // answer: telling it whether the key was unknown, the
+                // signature bad, or the list short would turn this into an
+                // oracle for probing the allowlist.
+                tracing::warn!(conn_id, peer = %peer, reason = %why, "refused a sender");
+                // Say "no" once, with no reason on the wire. The client then
+                // fails immediately instead of retransmitting HELLO into
+                // silence and reporting a timeout — which would send its
+                // operator to look at the network rather than at the policy.
+                // The reason stays in this log, on the machine whose
+                // operator set the policy: putting it in the packet would
+                // let anyone probe the allowlist by reading the excuses.
+                let _ = send_ctrl_with_payload(
+                    ctrl_socket, peer, PacketType::Error, conn_id, seq, &[],
+                ).await;
+                return Ok(None);
+            }
+        }
 
         let local_kp = ahp_crypto::key_exchange::generate_keypair();
         let local_nonce: [u8; 16] = rand::random();

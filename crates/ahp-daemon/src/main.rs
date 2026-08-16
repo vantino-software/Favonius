@@ -72,6 +72,24 @@ struct Args {
     /// handshake so clients can authenticate it via --server-key (S5)
     #[arg(long)]
     identity: Option<std::path::PathBuf>,
+
+    /// A sender identity permitted to write here: 64 hex characters, or a
+    /// file containing them. Repeat for each permitted sender.
+    ///
+    /// With no --allow-peer, any sender that authenticates is accepted —
+    /// which, without --require-peer-auth, means the daemon behaves exactly
+    /// as it always has.
+    #[arg(long = "allow-peer")]
+    allow_peer: Vec<String>,
+
+    /// Refuse senders that do not authenticate.
+    ///
+    /// Off by default: turning it on by default would stop every existing
+    /// deployment, whose clients have no identity configured. Turning it on
+    /// is what changes `--dest-root` from "a stranger may only overwrite
+    /// things under here" into "a stranger may not write at all".
+    #[arg(long)]
+    require_peer_auth: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -113,6 +131,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         None => None,
     };
 
+    // Who may send here. Parsed before anything binds a socket, so a
+    // mistyped key is a startup error rather than a refusal at 03:00.
+    let mut allowed = Vec::with_capacity(args.allow_peer.len());
+    for value in &args.allow_peer {
+        allowed.push(
+            ahp_crypto::signatures::parse_identity_pin(value)
+                .map_err(|e| format!("--allow-peer {value}: {e}"))?,
+        );
+    }
+    let peer_policy =
+        ahp_daemon::peer_auth::PeerPolicy::new(allowed, args.require_peer_auth);
+
     // Refuse to start in the configuration that hands an unauthenticated
     // peer arbitrary file write. Verified on 2026-08-11: with no
     // --dest-root, a sender reaching the control port wrote /root/PWNED.bin
@@ -147,7 +177,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Enabled unless refused, because the case it exists for -- an
     // evaluator whose firewall drops UDP -- is exactly the case where
     // nobody knows to turn it on.
-    if !args.no_tcp_fallback {
+    // The TCP fallback carries no handshake, so it cannot authenticate
+    // anybody. Leaving it listening while the UDP path demands an identity
+    // would publish a door with no lock beside a door with one — the
+    // policy would be worth nothing, and worse, it would read as enforced.
+    if args.require_peer_auth && !args.no_tcp_fallback {
+        tracing::warn!(
+            "--require-peer-auth disables the TCP fallback: it has no handshake and \
+             therefore no way to authenticate a sender. Transfers from clients whose \
+             network drops UDP will fail until they can reach the UDP port."
+        );
+    }
+    if !args.no_tcp_fallback && !args.require_peer_auth {
         let fb_root = args.dest_root.clone();
         match tokio::net::TcpListener::bind(control_addr).await {
             Ok(l) => {
@@ -192,7 +233,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tokio::spawn(async move {
         if let Err(e) = ahp_daemon::net_receiver::run_protocol_listener(
             control_addr, data_addr, max_concurrent, data_port_range, max_file_size, dest_root,
-            identity,
+            identity, peer_policy,
         ).await {
             tracing::error!("protocol listener failed: {}", e);
         }
