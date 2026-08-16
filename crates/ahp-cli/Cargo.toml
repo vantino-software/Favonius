@@ -68,6 +68,7 @@ libc = "0.2"
 io-uring = "0.7"
 
 [dev-dependencies]
+tempfile = "3"
 ahp-api = { workspace = true }
 ahp-daemon = { workspace = true }
 tokio = { workspace = true }

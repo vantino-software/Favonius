@@ -608,7 +608,7 @@ fn lexical_normalize(path: &std::path::Path) -> std::path::PathBuf {
 /// `root` must already be canonicalized (done once at startup). The joined
 /// path is lexically normalized and must stay under the root: absolute
 /// destinations outside the root and `..` escapes are rejected.
-fn confine_dest_path(root: &std::path::Path, dest: &str) -> Result<std::path::PathBuf, String> {
+pub(crate) fn confine_dest_path(root: &std::path::Path, dest: &str) -> Result<std::path::PathBuf, String> {
     let joined = lexical_normalize(&root.join(dest));
     if !joined.starts_with(root) {
         return Err(format!(
@@ -1102,6 +1102,19 @@ split, about (concurrent transfers) x (streams per transfer)",
                         continue;
                     }
                 };
+                // Connectivity probe from `favonius check`. Answered
+                // before decoding, because the point is to prove a
+                // datagram round trip on a host where the full protocol
+                // may not be reachable.
+                //
+                // The reply is exactly as long as the request: an
+                // unauthenticated responder that answers with more bytes
+                // than it receives is a reflection amplifier, and this
+                // port is open to anyone who can reach it.
+                if &buf[..len] == ahp_proto::fallback::PROBE {
+                    let _ = socket.send_to(ahp_proto::fallback::PROBE_REPLY, from).await;
+                    continue;
+                }
                 let pkt = match decode_packet(&buf[..len]) {
                     Ok(p) => p,
                     Err(e) => {

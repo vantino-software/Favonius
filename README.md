@@ -357,6 +357,61 @@ A **version mismatch is now reported as one**: the header decoder rejects
 any protocol version it does not implement instead of decoding the packet
 as if it were the current one.
 
+## Before anything else: will your network carry this?
+
+```bash
+favonius check receiver.example.com:7801
+```
+
+The first thing that stops a deployment is not the security review, it is
+the firewall. Enterprise ingress is closed by default and plenty of
+policies decline inbound UDP outright — so find out in five seconds rather
+than after a week of evaluation and a three-week change request.
+
+It reports each path separately, prints the rule to send your network
+team, and exits non-zero when no transfer is possible, so it can gate a
+script:
+
+```text
+    [ok  ] TCP 7801   fallback path
+    [ok  ] UDP 7801   control — handshake
+    [?   ] UDP 7802   data — silent when idle, which is normal
+```
+
+UDP silence is ambiguous by nature — a firewall drop, a stopped daemon and
+a lossy link look identical from outside — and the TCP line distinguishes
+the first two: if TCP connects, something is listening and UDP is being
+filtered.
+
+## When UDP is blocked
+
+Favonius falls back to TCP rather than failing:
+
+```bash
+favonius send big.bin receiver.example.com:7801:/srv/incoming/big.bin --transport tcp
+```
+
+The daemon listens for this on the **TCP socket bearing the control port's
+number**, so a deployment asks for one port rather than two:
+
+> permit 7801 to this host — UDP for speed, TCP as the fallback.
+
+**It makes no performance claim.** There is no congestion control, no
+multi-stream multiplexing, and none of the measurements in this README
+apply to it; the kernel's TCP stack does the work. On the impaired links
+Favonius exists for it will be markedly slower. That is the trade: a
+transfer that arrives slowly beats one that needs a change request.
+
+It keeps the guarantees that matter. Bytes stream to a `.part` file, are
+hashed with BLAKE3 on the way past, and are renamed into place only when
+the payload is complete *and* the trailing hash matches — so a truncated
+or altered transfer is refused rather than written. `--dest-root`
+confinement is the same code the UDP path uses, not a second
+implementation. And it inherits the same limitation, stated in
+[SECURITY.md](SECURITY.md): **senders are not authenticated**. Opening the
+TCP port widens that posture from one protocol to two; permit both or
+neither. Disable it with `--no-tcp-fallback`.
+
 ## Firewall Rules
 
 Favonius uses UDP for its data plane. If UFW (or another firewall) is
