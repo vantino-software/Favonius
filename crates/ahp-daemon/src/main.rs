@@ -48,6 +48,16 @@ struct Args {
     /// unless --allow-any-dest is passed (S1)
     #[arg(long)]
     dest_root: Option<std::path::PathBuf>,
+
+    /// Do not listen for TCP fallback transfers.
+    ///
+    /// The fallback is on by default: it exists for the deployment whose
+    /// firewall drops UDP, and that is precisely the deployment where
+    /// nobody would know to enable it. Turn it off where the extra
+    /// listener is unwanted -- noting it is the same unauthenticated
+    /// posture as the UDP path, not a new one.
+    #[arg(long)]
+    no_tcp_fallback: bool,
     /// Accept arbitrary sender-chosen absolute destination paths.
     ///
     /// This grants any peer that can reach the control port the ability to
@@ -128,6 +138,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // Start AHP protocol listener with separate control + data ports.
     let control_addr: std::net::SocketAddr = args.protocol_listen.parse()?;
+
+    // The TCP fallback shares the control port's *number* on the TCP
+    // socket, so a deployment asks its network team for one port rather
+    // than two: "permit 7801 to this host, UDP for speed and TCP as the
+    // fallback." UDP and TCP sockets on the same number do not conflict.
+    //
+    // Enabled unless refused, because the case it exists for -- an
+    // evaluator whose firewall drops UDP -- is exactly the case where
+    // nobody knows to turn it on.
+    if !args.no_tcp_fallback {
+        let fb_root = args.dest_root.clone();
+        match tokio::net::TcpListener::bind(control_addr).await {
+            Ok(l) => {
+                tokio::spawn(async move {
+                    if let Err(e) = ahp_daemon::tcp_fallback::serve(l, fb_root).await {
+                        tracing::error!(error = %e, "TCP fallback listener stopped");
+                    }
+                });
+            }
+            Err(e) => {
+                // Not fatal: the UDP path is the product, and a taken TCP
+                // port should not stop the daemon serving it.
+                tracing::warn!(addr = %control_addr, error = %e,
+                    "could not bind the TCP fallback; UDP transfers are unaffected");
+            }
+        }
+    }
     let data_addr: std::net::SocketAddr = args.data_listen.parse()?;
     let max_concurrent = args.max_concurrent;
     // Parsed here so a malformed range is a startup error with a usage

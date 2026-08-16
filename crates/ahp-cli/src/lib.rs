@@ -5,6 +5,8 @@
 pub mod fs_tree;
 pub mod sync_plan;
 pub mod net_probe;
+pub mod preflight;
+pub mod tcp_sender;
 pub mod net_sender;
 pub mod udt_transport;
 

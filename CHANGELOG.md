@@ -7,6 +7,25 @@ Notable changes to Favonius. Format follows
 While the major version is 0, the wire protocol and the CLI may both change
 in a minor release. See [Stability](#stability).
 
+## Unreleased
+
+### Added
+
+- `favonius check <host:port>` — a connectivity pre-flight. Probes the TCP
+  fallback, the UDP control port and the UDP data port, prints the firewall
+  rule to request, and exits non-zero when no transfer is possible. The
+  daemon answers a probe datagram with a reply of exactly the same length,
+  so the check cannot be used as a reflection amplifier.
+- **TCP fallback.** `--transport tcp`, and a daemon listener on the TCP
+  socket bearing the control port's number, so a deployment opens one port
+  rather than two. No congestion control, no multi-stream, and no
+  performance claim — it exists so that "can we move a file at all" is
+  always yes on a network that blocks UDP. Streams to a `.part`, verifies
+  BLAKE3 before committing by rename, and reuses the same `--dest-root`
+  confinement as the UDP path. Disable with `--no-tcp-fallback`.
+  Senders remain unauthenticated, as on the UDP path.
+
+
 ## [0.1.0] — 2026-08-15
 
 First public release.

@@ -4,7 +4,7 @@
 
 use clap::{Parser, Subcommand};
 use ahp_cli::sync_plan::{self, Compare, SyncMode};
-use ahp_cli::{fs_tree, FavoniusClient, CliError, net_sender, udt_transport};
+use ahp_cli::{fs_tree, FavoniusClient, CliError, net_sender, preflight, tcp_sender, udt_transport};
 use ahp_congestion::CongestionProfile;
 use ahp_policy::{AdaptivePolicy, NetworkContext};
 use ahp_proto::data::AckMode;
@@ -28,6 +28,21 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
+    /// Check whether this network will carry a transfer
+    ///
+    /// Run this before anything else. The first thing that stops a
+    /// deployment is not the security review, it is the firewall — and
+    /// finding that out in five seconds is worth more than finding out in
+    /// three weeks.
+    Check {
+        /// Destination host, with an optional control port: `host` or
+        /// `host:7801`
+        target: String,
+        /// AHP data port. Defaults to the control port plus one, which is
+        /// the daemon's own default.
+        #[arg(long)]
+        data_port: Option<u16>,
+    },
     /// Send files to a destination
     Send {
         source: String,
@@ -54,7 +69,9 @@ enum Command {
         /// Pacing mode: auto, batch (GSO/sendmmsg, default), perpacket, iouring (slower than GSO, debug only), xdp (experimental)
         #[arg(long, default_value = "auto")]
         pacing: String,
-        /// Transport backend: ahp (default), udt (sendfile/recvfile), xdp (AF_XDP zero-copy)
+        /// Transport backend: ahp (default), tcp (fallback for networks
+        /// that block UDP — correct but not accelerated), udt
+        /// (sendfile/recvfile), xdp (AF_XDP zero-copy)
         #[arg(long, default_value = "ahp")]
         transport: String,
         /// Encrypt the transfer using AES-256-GCM with X25519 key exchange
@@ -191,6 +208,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let client = FavoniusClient::new(&cli.daemon);
 
     match cli.command {
+        // ── Connectivity ─────────────────────────────────────────────
+        Command::Check { target, data_port } => {
+            let (host, control_port) = match target.rsplit_once(':') {
+                // Guard against an IPv6 literal being split on its own colons.
+                Some((h, p)) if !h.contains(':') || h.starts_with('[') => {
+                    match p.parse::<u16>() {
+                        Ok(port) => (h.trim_matches(|c| c == '[' || c == ']').to_string(), port),
+                        Err(_) => (target.clone(), 7801),
+                    }
+                }
+                _ => (target.clone(), 7801),
+            };
+            let data = data_port.unwrap_or(control_port.saturating_add(1));
+            let report = preflight::run(&host, control_port, data).await;
+            preflight::print(&report);
+            // A non-zero exit so this can gate a script or a CI step, not
+            // only inform a person reading a terminal.
+            if !report.transfer_possible() {
+                std::process::exit(1);
+            }
+            return Ok(());
+        }
+
         Command::Send { source, destination, compression, congestion, ack_mode, streams, pacing, transport, encrypt, header_protect, resume, server_key, adaptive, policy_path, include, exclude, dry_run, bandwidth_limit } => {
             // No code path reads this. It was destructured away with `..`,
             // so `--bandwidth-limit 10` capped nothing and said nothing —
@@ -204,6 +244,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                      (tc/qdisc), until it is.".into(),
                 )));
             }
+            // TCP fallback: no AHP, no congestion control, no speed claim.
+            // Chosen explicitly here; `net_sender` falls back to it on its
+            // own when a handshake finds nothing at the far end.
+            if transport == "tcp" {
+                let Some((remote_addr, dest_path)) = net_sender::parse_remote_dest(&destination)
+                else {
+                    return Err(Box::<dyn std::error::Error>::from(CliError::Config(
+                        "--transport tcp needs a remote destination, host:port:/path".into(),
+                    )));
+                };
+                eprintln!("Transport: TCP fallback (no acceleration — see `favonius check`)");
+                match tcp_sender::send_file(
+                    std::path::Path::new(&source), remote_addr, &dest_path,
+                ).await {
+                    Ok(s) => {
+                        println!(
+                            "TCP fallback complete: {} bytes in {:.2}s ({:.1} MiB/s)",
+                            s.bytes_sent, s.elapsed.as_secs_f64(), s.throughput_mib_s(),
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+
             // UDT transport: bypass AHP entirely, use sendfile/recvfile.
             if transport == "udt" {
                 eprintln!("Transport: UDT (sendfile/recvfile baseline)");
