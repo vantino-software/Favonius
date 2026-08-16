@@ -31,13 +31,20 @@
 
 use std::collections::BTreeSet;
 
+use ahp_crypto::grant::{Grant, VerifiedGrant};
 use ahp_crypto::signatures::{hex_encode, VerifyingKeyRef};
 
 /// What the daemon decided about a sender.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
-    /// The sender proved an identity that is on the allowlist.
-    Authenticated([u8; 32]),
+    /// The sender proved an identity the policy accepts, and — when it
+    /// presented one — a grant that checked out. The grant travels with the
+    /// decision because the path it permits cannot be checked yet: the
+    /// destination path arrives in the MANIFEST, after this handshake.
+    Authenticated {
+        identity: [u8; 32],
+        grant: Option<VerifiedGrant>,
+    },
     /// The sender did not authenticate, and this daemon does not insist.
     /// The historical behaviour, and still the default.
     Anonymous,
@@ -57,6 +64,17 @@ impl Decision {
 pub struct PeerPolicy {
     allowed: BTreeSet<[u8; 32]>,
     require: bool,
+    /// Public keys whose signature makes a grant worth reading. A list, not
+    /// one key, because that is what makes rotation possible without a flag
+    /// day: publish the new anchor, let daemons accept both, switch
+    /// issuance, retire the old one.
+    anchors: Vec<[u8; 32]>,
+    require_grant: bool,
+    /// This daemon's own identity. A grant names the daemon it was issued
+    /// for, and without knowing which daemon it is, this one cannot tell a
+    /// permission meant for it from a permission meant for another machine
+    /// trusting the same anchor.
+    own_identity: Option<[u8; 32]>,
 }
 
 impl PeerPolicy {
@@ -69,13 +87,48 @@ impl PeerPolicy {
     /// unauthenticated ones still work, so the allowlist can be populated
     /// and verified before it starts turning anybody away.
     pub fn new(allowed: impl IntoIterator<Item = [u8; 32]>, require: bool) -> Self {
-        Self { allowed: allowed.into_iter().collect(), require }
+        Self {
+            allowed: allowed.into_iter().collect(),
+            require,
+            anchors: Vec::new(),
+            require_grant: false,
+            own_identity: None,
+        }
+    }
+
+    /// Accept grants signed by `anchors`, addressed to `own_identity`.
+    ///
+    /// `require_grant` implies requiring authentication, and is forced here
+    /// rather than left to the caller: a grant names the sender it is for,
+    /// so demanding one from a sender that proved no identity would be
+    /// demanding a document nobody checked the bearer of.
+    pub fn with_trust_anchors(
+        mut self,
+        anchors: impl IntoIterator<Item = [u8; 32]>,
+        require_grant: bool,
+        own_identity: Option<[u8; 32]>,
+    ) -> Self {
+        self.anchors = anchors.into_iter().collect();
+        self.require_grant = require_grant;
+        self.own_identity = own_identity;
+        if require_grant {
+            self.require = true;
+        }
+        self
+    }
+
+    pub fn requires_grant(&self) -> bool {
+        self.require_grant
+    }
+
+    pub fn anchor_count(&self) -> usize {
+        self.anchors.len()
     }
 
     /// Whether this daemon will turn anyone away. Used to decide whether
     /// to advertise the capability and what to say at startup.
     pub fn is_enforcing(&self) -> bool {
-        self.require || !self.allowed.is_empty()
+        self.require || !self.allowed.is_empty() || !self.anchors.is_empty()
     }
 
     pub fn allowed_count(&self) -> usize {
@@ -90,8 +143,10 @@ impl PeerPolicy {
     pub fn decide(
         &self,
         presented: Option<(&[u8; 32], &[u8; 64])>,
+        grant_bytes: Option<&[u8]>,
         ephemeral_pub: &[u8; 32],
         nonce: &[u8],
+        now: u64,
     ) -> Decision {
         let Some((identity, signature)) = presented else {
             return if self.require {
@@ -131,7 +186,48 @@ impl PeerPolicy {
             ));
         }
 
-        Decision::Authenticated(*identity)
+        // ── The grant, if this daemon deals in them ──────────────────────
+        let grant = match grant_bytes {
+            Some(bytes) if !self.anchors.is_empty() => {
+                // A daemon that accepts grants must know its own identity,
+                // or it cannot check that one was addressed to it. Treated
+                // as a refusal rather than as "skip the check": the
+                // alternative is accepting a permission meant for another
+                // machine.
+                let Some(destination) = self.own_identity else {
+                    return Decision::Refused(
+                        "a grant was presented but this daemon has no --identity, so it \
+                         cannot tell whether the grant was issued for it"
+                            .into(),
+                    );
+                };
+                match Grant::verify(bytes, &self.anchors, &destination, identity, now) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        return Decision::Refused(format!(
+                            "sender {} presented a grant that did not check out: {e}",
+                            hex_encode(&identity[..4])
+                        ))
+                    }
+                }
+            }
+            // Presented one, but this daemon trusts nobody to issue them, so
+            // there is nothing to verify it against. Ignored rather than
+            // refused: the sender may simply be talking to a daemon that
+            // does not use grants, which is not its mistake.
+            Some(_) => None,
+            None => None,
+        };
+
+        if self.require_grant && grant.is_none() {
+            return Decision::Refused(format!(
+                "sender {} authenticated but presented no valid grant, and this daemon \
+                 requires one",
+                hex_encode(&identity[..4])
+            ));
+        }
+
+        Decision::Authenticated { identity: *identity, grant }
     }
 }
 
@@ -142,6 +238,13 @@ mod tests {
 
     const EPH: [u8; 32] = [7u8; 32];
     const NONCE: [u8; 16] = [9u8; 16];
+    /// Any time after the clock-sanity floor; grants below set their own.
+    const NOW: u64 = 1_800_000_000;
+
+    /// `decide` for the cases that involve no grant.
+    fn decide(p: &PeerPolicy, presented: Option<(&[u8; 32], &[u8; 64])>) -> Decision {
+        p.decide(presented, None, &EPH, &NONCE, NOW)
+    }
 
     fn offer(id: &SigningIdentity) -> ([u8; 32], [u8; 64]) {
         (id.public_bytes(), id.sign_client_offer(&EPH, &NONCE))
@@ -153,13 +256,13 @@ mod tests {
         // the daemon breaks every existing deployment.
         let p = PeerPolicy::default();
         assert!(!p.is_enforcing());
-        assert_eq!(p.decide(None, &EPH, &NONCE), Decision::Anonymous);
+        assert_eq!(decide(&p, None), Decision::Anonymous);
     }
 
     #[test]
     fn requiring_auth_refuses_a_sender_that_offers_none() {
         let p = PeerPolicy::new([], true);
-        assert!(p.decide(None, &EPH, &NONCE).is_refused());
+        assert!(decide(&p, None).is_refused());
     }
 
     #[test]
@@ -169,7 +272,7 @@ mod tests {
         let id = SigningIdentity::generate();
         let (pk, sig) = offer(&id);
         let p = PeerPolicy::new([], true);
-        assert_eq!(p.decide(Some((&pk, &sig)), &EPH, &NONCE), Decision::Authenticated(pk));
+        assert_eq!(decide(&p, Some((&pk, &sig))), Decision::Authenticated { identity: pk, grant: None });
     }
 
     #[test]
@@ -177,7 +280,7 @@ mod tests {
         let id = SigningIdentity::generate();
         let (pk, sig) = offer(&id);
         let p = PeerPolicy::new([pk], true);
-        assert_eq!(p.decide(Some((&pk, &sig)), &EPH, &NONCE), Decision::Authenticated(pk));
+        assert_eq!(decide(&p, Some((&pk, &sig))), Decision::Authenticated { identity: pk, grant: None });
     }
 
     #[test]
@@ -188,7 +291,7 @@ mod tests {
         let stranger = SigningIdentity::generate();
         let (pk, sig) = offer(&stranger);
         let p = PeerPolicy::new([allowed.public_bytes()], true);
-        assert!(p.decide(Some((&pk, &sig)), &EPH, &NONCE).is_refused());
+        assert!(decide(&p, Some((&pk, &sig))).is_refused());
     }
 
     #[test]
@@ -200,7 +303,7 @@ mod tests {
         let pk = allowed.public_bytes();
         let sig = attacker.sign_client_offer(&EPH, &NONCE);
         let p = PeerPolicy::new([pk], true);
-        let d = p.decide(Some((&pk, &sig)), &EPH, &NONCE);
+        let d = decide(&p, Some((&pk, &sig)));
         assert!(d.is_refused(), "{d:?}");
         // Refused for the signature, not for membership — otherwise the
         // check order would leak whether that key is on the list.
@@ -215,8 +318,8 @@ mod tests {
         let id = SigningIdentity::generate();
         let (pk, sig) = offer(&id);
         let p = PeerPolicy::new([pk], true);
-        assert!(p.decide(Some((&pk, &sig)), &[8u8; 32], &NONCE).is_refused());
-        assert!(p.decide(Some((&pk, &sig)), &EPH, &[10u8; 16]).is_refused());
+        assert!(p.decide(Some((&pk, &sig)), None, &[8u8; 32], &NONCE, NOW).is_refused());
+        assert!(p.decide(Some((&pk, &sig)), None, &EPH, &[10u8; 16], NOW).is_refused());
     }
 
     #[test]
@@ -227,7 +330,7 @@ mod tests {
         let id = SigningIdentity::generate();
         let p = PeerPolicy::new([id.public_bytes()], false);
         assert!(p.is_enforcing());
-        assert_eq!(p.decide(None, &EPH, &NONCE), Decision::Anonymous);
+        assert_eq!(decide(&p, None), Decision::Anonymous);
     }
 
     #[test]
@@ -236,7 +339,7 @@ mod tests {
         let stranger = SigningIdentity::generate();
         let (pk, sig) = offer(&stranger);
         let p = PeerPolicy::new([allowed.public_bytes()], false);
-        assert!(p.decide(Some((&pk, &sig)), &EPH, &NONCE).is_refused());
+        assert!(decide(&p, Some((&pk, &sig))).is_refused());
     }
 
     #[test]
@@ -244,7 +347,153 @@ mod tests {
         // All-zeros is not a valid Ed25519 point. It is also the first
         // thing anybody tries.
         let p = PeerPolicy::new([], true);
-        let d = p.decide(Some((&[0u8; 32], &[0u8; 64])), &EPH, &NONCE);
+        let d = decide(&p, Some((&[0u8; 32], &[0u8; 64])));
         assert!(d.is_refused(), "{d:?}");
+    }
+
+    // ── Grants ────────────────────────────────────────────────────────────
+
+    use ahp_crypto::grant::Grant;
+
+    fn a_grant(source: [u8; 32], destination: [u8; 32], prefix: &str) -> Grant {
+        Grant {
+            source,
+            destination,
+            not_after: NOW + 300,
+            run_id: "run-1".into(),
+            path_prefix: prefix.into(),
+        }
+    }
+
+    struct GrantFixture {
+        anchor: SigningIdentity,
+        client: SigningIdentity,
+        daemon_id: [u8; 32],
+    }
+
+    fn grant_fixture() -> GrantFixture {
+        GrantFixture {
+            anchor: SigningIdentity::generate(),
+            client: SigningIdentity::generate(),
+            daemon_id: SigningIdentity::generate().public_bytes(),
+        }
+    }
+
+    fn policy_with_grants(f: &GrantFixture, require_grant: bool) -> PeerPolicy {
+        PeerPolicy::new([], true).with_trust_anchors(
+            [f.anchor.public_bytes()],
+            require_grant,
+            Some(f.daemon_id),
+        )
+    }
+
+    #[test]
+    fn a_valid_grant_is_carried_into_the_decision() {
+        let f = grant_fixture();
+        let (pk, sig) = offer(&f.client);
+        let bytes = a_grant(pk, f.daemon_id, "/srv/in").sign(&f.anchor);
+        let p = policy_with_grants(&f, true);
+        match p.decide(Some((&pk, &sig)), Some(&bytes), &EPH, &NONCE, NOW) {
+            Decision::Authenticated { grant: Some(g), .. } => {
+                // The path scope has to survive to the caller: it is applied
+                // later, when the manifest names a destination.
+                assert!(g.permits_path("/srv/in/a.bin"));
+                assert!(!g.permits_path("/etc/cron.d/pwn"));
+            }
+            other => panic!("expected an authenticated decision with a grant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn requiring_a_grant_refuses_a_sender_that_brings_none() {
+        let f = grant_fixture();
+        let (pk, sig) = offer(&f.client);
+        let p = policy_with_grants(&f, true);
+        assert!(p.decide(Some((&pk, &sig)), None, &EPH, &NONCE, NOW).is_refused());
+    }
+
+    #[test]
+    fn a_grant_issued_to_another_sender_is_refused() {
+        // The grant must be bound to the identity that actually
+        // authenticated, or a grant captured off the wire would be usable by
+        // anyone who replayed it.
+        let f = grant_fixture();
+        let (pk, sig) = offer(&f.client);
+        let someone_else = SigningIdentity::generate().public_bytes();
+        let bytes = a_grant(someone_else, f.daemon_id, "/srv/in").sign(&f.anchor);
+        let p = policy_with_grants(&f, true);
+        assert!(p.decide(Some((&pk, &sig)), Some(&bytes), &EPH, &NONCE, NOW).is_refused());
+    }
+
+    #[test]
+    fn a_grant_from_an_untrusted_issuer_is_refused() {
+        let f = grant_fixture();
+        let (pk, sig) = offer(&f.client);
+        let bytes = a_grant(pk, f.daemon_id, "/srv/in").sign(&SigningIdentity::generate());
+        let p = policy_with_grants(&f, true);
+        assert!(p.decide(Some((&pk, &sig)), Some(&bytes), &EPH, &NONCE, NOW).is_refused());
+    }
+
+    #[test]
+    fn an_expired_grant_is_refused() {
+        let f = grant_fixture();
+        let (pk, sig) = offer(&f.client);
+        let bytes = a_grant(pk, f.daemon_id, "/srv/in").sign(&f.anchor);
+        let p = policy_with_grants(&f, true);
+        assert!(p.decide(Some((&pk, &sig)), Some(&bytes), &EPH, &NONCE, NOW + 301).is_refused());
+    }
+
+    #[test]
+    fn a_daemon_with_no_identity_refuses_a_grant_rather_than_skipping_the_check() {
+        // It cannot tell whether the grant was addressed to it. Skipping
+        // would accept a permission meant for another machine.
+        let f = grant_fixture();
+        let (pk, sig) = offer(&f.client);
+        let bytes = a_grant(pk, f.daemon_id, "/srv/in").sign(&f.anchor);
+        let p = PeerPolicy::new([], true)
+            .with_trust_anchors([f.anchor.public_bytes()], true, None);
+        assert!(p.decide(Some((&pk, &sig)), Some(&bytes), &EPH, &NONCE, NOW).is_refused());
+    }
+
+    #[test]
+    fn requiring_a_grant_also_requires_authentication() {
+        // A grant names its bearer. Demanding one from a sender that proved
+        // nothing would be demanding a document nobody checked the bearer
+        // of, so the constructor forces the stricter of the two.
+        let f = grant_fixture();
+        let p = PeerPolicy::new([], false)
+            .with_trust_anchors([f.anchor.public_bytes()], true, Some(f.daemon_id));
+        assert!(p.decide(None, None, &EPH, &NONCE, NOW).is_refused());
+    }
+
+    #[test]
+    fn a_daemon_with_no_anchors_ignores_a_grant_rather_than_refusing_it() {
+        // The sender may just be talking to a daemon that does not use
+        // grants. That is not the sender's mistake, and refusing would make
+        // a client configured for one estate unusable against another.
+        let f = grant_fixture();
+        let (pk, sig) = offer(&f.client);
+        let bytes = a_grant(pk, f.daemon_id, "/srv/in").sign(&f.anchor);
+        let p = PeerPolicy::new([pk], true);
+        match p.decide(Some((&pk, &sig)), Some(&bytes), &EPH, &NONCE, NOW) {
+            Decision::Authenticated { grant, .. } => assert!(grant.is_none()),
+            other => panic!("expected acceptance without a grant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn any_configured_anchor_may_have_issued_the_grant() {
+        // Rotation, at the policy layer: both anchors are accepted during
+        // the overlap, so the estate is never reconfigured in one window.
+        let f = grant_fixture();
+        let retiring = SigningIdentity::generate();
+        let (pk, sig) = offer(&f.client);
+        let bytes = a_grant(pk, f.daemon_id, "/srv/in").sign(&retiring);
+        let p = PeerPolicy::new([], true).with_trust_anchors(
+            [f.anchor.public_bytes(), retiring.public_bytes()],
+            true,
+            Some(f.daemon_id),
+        );
+        assert!(!p.decide(Some((&pk, &sig)), Some(&bytes), &EPH, &NONCE, NOW).is_refused());
     }
 }

@@ -22,6 +22,7 @@ use ahp_cli::net_sender::send_file;
 use ahp_compression::CompressionProfile;
 use ahp_congestion::CongestionProfile;
 use ahp_crypto::signatures::SigningIdentity;
+use ahp_crypto::grant::Grant;
 use ahp_daemon::peer_auth::PeerPolicy;
 use ahp_proto::data::AckMode;
 use std::net::SocketAddr;
@@ -82,8 +83,25 @@ struct Daemon {
     server_key: [u8; 32],
 }
 
+/// Start a loopback daemon under a policy built from its own identity.
+///
+/// The policy is built *here* rather than passed in, because a grant names
+/// the daemon it was issued for: the policy has to be told the identity the
+/// daemon will actually run with, and the two must be the same key.
+async fn start_daemon_with(
+    make_policy: impl FnOnce([u8; 32]) -> PeerPolicy,
+) -> Option<Daemon> {
+    let identity = SigningIdentity::generate();
+    let own = identity.public_bytes();
+    start_daemon_inner(make_policy(own), identity).await
+}
+
 /// Start a loopback daemon under `policy`.
 async fn start_daemon(policy: PeerPolicy) -> Option<Daemon> {
+    start_daemon_inner(policy, SigningIdentity::generate()).await
+}
+
+async fn start_daemon_inner(policy: PeerPolicy, identity: SigningIdentity) -> Option<Daemon> {
     let base = free_port_run(2)?;
     let control: SocketAddr = format!("127.0.0.1:{base}").parse().unwrap();
     let data: SocketAddr = format!("127.0.0.1:{}", base + 1).parse().unwrap();
@@ -92,7 +110,6 @@ async fn start_daemon(policy: PeerPolicy) -> Option<Daemon> {
     let dest_root = dir.path().to_path_buf();
     let root = dest_root.clone();
 
-    let identity = SigningIdentity::generate();
     let server_key = identity.public_bytes();
 
     tokio::spawn(async move {
@@ -119,6 +136,16 @@ async fn attempt(
     client_identity: Option<&SigningIdentity>,
     require_peer_auth: bool,
 ) -> bool {
+    attempt_with_grant(daemon, name, client_identity, None, require_peer_auth).await
+}
+
+async fn attempt_with_grant(
+    daemon: &Daemon,
+    name: &str,
+    client_identity: Option<&SigningIdentity>,
+    grant: Option<&[u8]>,
+    require_peer_auth: bool,
+) -> bool {
     let src_dir = Scratch::new("peer-auth-src").expect("scratch");
     let source = src_dir.path().join("payload.bin");
     std::fs::write(&source, b"the quick brown fox").expect("write source");
@@ -141,6 +168,7 @@ async fn attempt(
             false,
             Some(daemon.server_key),
             client_identity,
+            grant,
             require_peer_auth,
         ),
     )
@@ -249,4 +277,253 @@ async fn an_allowlist_without_require_still_admits_anonymous_senders() {
     };
     assert!(attempt(&d, "anon.bin", None, false).await, "migration posture refused a plain sender");
     assert!(landed(&d, "anon.bin"));
+}
+
+// ── Grants ────────────────────────────────────────────────────────────────
+
+fn grant_bytes(
+    anchor: &SigningIdentity,
+    source: [u8; 32],
+    destination: [u8; 32],
+    prefix: &str,
+    not_after: u64,
+) -> Vec<u8> {
+    Grant {
+        source,
+        destination,
+        not_after,
+        run_id: "run-under-test".into(),
+        path_prefix: prefix.into(),
+    }
+    .sign(anchor)
+}
+
+fn in_five_minutes() -> u64 {
+    ahp_crypto::grant::now_unix() + 300
+}
+
+#[tokio::test]
+async fn a_valid_grant_transfers() {
+    let anchor = SigningIdentity::generate();
+    let client = SigningIdentity::generate();
+    let anchor_pub = anchor.public_bytes();
+    let Some(d) = start_daemon_with(|own| {
+        PeerPolicy::new([], true).with_trust_anchors([anchor_pub], true, Some(own))
+    })
+    .await
+    else {
+        eprintln!("skipped: no free ports");
+        return;
+    };
+    let g = grant_bytes(
+        &anchor,
+        client.public_bytes(),
+        d.server_key,
+        d.dest_root.to_str().unwrap(),
+        in_five_minutes(),
+    );
+    assert!(
+        attempt_with_grant(&d, "ok.bin", Some(&client), Some(&g), true).await,
+        "a valid grant was refused"
+    );
+    assert!(landed(&d, "ok.bin"));
+}
+
+#[tokio::test]
+async fn an_authenticated_sender_without_a_grant_writes_nothing() {
+    // The whole point of --require-grant: being a known sender is no longer
+    // enough on its own.
+    let anchor = SigningIdentity::generate();
+    let client = SigningIdentity::generate();
+    let anchor_pub = anchor.public_bytes();
+    let Some(d) = start_daemon_with(|own| {
+        PeerPolicy::new([], true).with_trust_anchors([anchor_pub], true, Some(own))
+    })
+    .await
+    else {
+        eprintln!("skipped: no free ports");
+        return;
+    };
+    assert!(!attempt(&d, "nogrant.bin", Some(&client), false).await);
+    assert!(!landed(&d, "nogrant.bin"), "a sender with no grant wrote a file");
+}
+
+#[tokio::test]
+async fn a_grant_from_an_untrusted_issuer_writes_nothing() {
+    let anchor = SigningIdentity::generate();
+    let impostor = SigningIdentity::generate();
+    let client = SigningIdentity::generate();
+    let anchor_pub = anchor.public_bytes();
+    let Some(d) = start_daemon_with(|own| {
+        PeerPolicy::new([], true).with_trust_anchors([anchor_pub], true, Some(own))
+    })
+    .await
+    else {
+        eprintln!("skipped: no free ports");
+        return;
+    };
+    let g = grant_bytes(
+        &impostor,
+        client.public_bytes(),
+        d.server_key,
+        d.dest_root.to_str().unwrap(),
+        in_five_minutes(),
+    );
+    assert!(!attempt_with_grant(&d, "forged.bin", Some(&client), Some(&g), false).await);
+    assert!(!landed(&d, "forged.bin"), "a forged grant wrote a file");
+}
+
+#[tokio::test]
+async fn an_expired_grant_writes_nothing() {
+    let anchor = SigningIdentity::generate();
+    let client = SigningIdentity::generate();
+    let anchor_pub = anchor.public_bytes();
+    let Some(d) = start_daemon_with(|own| {
+        PeerPolicy::new([], true).with_trust_anchors([anchor_pub], true, Some(own))
+    })
+    .await
+    else {
+        eprintln!("skipped: no free ports");
+        return;
+    };
+    let g = grant_bytes(
+        &anchor,
+        client.public_bytes(),
+        d.server_key,
+        d.dest_root.to_str().unwrap(),
+        ahp_crypto::grant::now_unix() - 1,
+    );
+    assert!(!attempt_with_grant(&d, "stale.bin", Some(&client), Some(&g), false).await);
+    assert!(!landed(&d, "stale.bin"), "an expired grant wrote a file");
+}
+
+#[tokio::test]
+async fn a_grant_issued_for_another_daemon_writes_nothing() {
+    // Without the destination binding, one permission would be a permission
+    // everywhere the same anchor is trusted.
+    let anchor = SigningIdentity::generate();
+    let client = SigningIdentity::generate();
+    let anchor_pub = anchor.public_bytes();
+    let Some(d) = start_daemon_with(|own| {
+        PeerPolicy::new([], true).with_trust_anchors([anchor_pub], true, Some(own))
+    })
+    .await
+    else {
+        eprintln!("skipped: no free ports");
+        return;
+    };
+    let elsewhere = SigningIdentity::generate().public_bytes();
+    let g = grant_bytes(
+        &anchor,
+        client.public_bytes(),
+        elsewhere,
+        d.dest_root.to_str().unwrap(),
+        in_five_minutes(),
+    );
+    assert!(!attempt_with_grant(&d, "wrongdest.bin", Some(&client), Some(&g), false).await);
+    assert!(!landed(&d, "wrongdest.bin"), "a grant for another daemon wrote a file");
+}
+
+#[tokio::test]
+async fn a_write_outside_the_granted_prefix_is_refused() {
+    // The path scope is enforced after the manifest names a destination,
+    // which is a different code path from everything above — and the one
+    // that would silently do nothing if it were never wired up.
+    let anchor = SigningIdentity::generate();
+    let client = SigningIdentity::generate();
+    let anchor_pub = anchor.public_bytes();
+    let Some(d) = start_daemon_with(|own| {
+        PeerPolicy::new([], true).with_trust_anchors([anchor_pub], true, Some(own))
+    })
+    .await
+    else {
+        eprintln!("skipped: no free ports");
+        return;
+    };
+    // Permit only a subdirectory, then try to write beside it.
+    let permitted = d.dest_root.join("allowed");
+    std::fs::create_dir_all(&permitted).expect("mkdir");
+    let g = grant_bytes(
+        &anchor,
+        client.public_bytes(),
+        d.server_key,
+        permitted.to_str().unwrap(),
+        in_five_minutes(),
+    );
+
+    assert!(
+        attempt_with_grant(&d, "allowed/inside.bin", Some(&client), Some(&g), true).await,
+        "a write inside the prefix was refused"
+    );
+    assert!(landed(&d, "allowed/inside.bin"));
+
+    assert!(
+        !attempt_with_grant(&d, "outside.bin", Some(&client), Some(&g), false).await,
+        "a write outside the prefix succeeded"
+    );
+    assert!(!landed(&d, "outside.bin"), "a write outside the granted prefix landed");
+}
+
+#[tokio::test]
+async fn a_daemon_that_accepts_grants_still_serves_a_sender_that_brings_none() {
+    // Anchors configured but not required: the migration posture again, one
+    // layer up. Grants are checked when presented and their absence is not
+    // an error.
+    let anchor = SigningIdentity::generate();
+    let client = SigningIdentity::generate();
+    let anchor_pub = anchor.public_bytes();
+    let Some(d) = start_daemon_with(|own| {
+        PeerPolicy::new([], true).with_trust_anchors([anchor_pub], false, Some(own))
+    })
+    .await
+    else {
+        eprintln!("skipped: no free ports");
+        return;
+    };
+    assert!(attempt(&d, "nogrant.bin", Some(&client), false).await, "refused without a grant");
+    assert!(landed(&d, "nogrant.bin"));
+}
+
+#[tokio::test]
+async fn a_second_transfer_cannot_skip_the_checks_by_resuming() {
+    // The hole this pins shut: a successful transfer used to earn a 0-RTT
+    // session ticket, and a HELLO carrying a ticket took a branch that ran
+    // none of the authorisation checks. A sender authorised for one
+    // directory and five minutes could then write anywhere under
+    // --dest-root for as long as the ticket lived.
+    //
+    // The client caches tickets per process, so doing both transfers in one
+    // test is what makes this reachable at all.
+    let anchor = SigningIdentity::generate();
+    let client = SigningIdentity::generate();
+    let anchor_pub = anchor.public_bytes();
+    let Some(d) = start_daemon_with(|own| {
+        PeerPolicy::new([], true).with_trust_anchors([anchor_pub], true, Some(own))
+    })
+    .await
+    else {
+        eprintln!("skipped: no free ports");
+        return;
+    };
+
+    let g = grant_bytes(
+        &anchor,
+        client.public_bytes(),
+        d.server_key,
+        d.dest_root.to_str().unwrap(),
+        in_five_minutes(),
+    );
+    assert!(
+        attempt_with_grant(&d, "first.bin", Some(&client), Some(&g), true).await,
+        "the authorised transfer should succeed"
+    );
+    assert!(landed(&d, "first.bin"));
+
+    // Same process, same client, now with no grant at all. If a ticket from
+    // the first transfer could be replayed, this would land.
+    assert!(
+        !attempt(&d, "second.bin", Some(&client), false).await,
+        "a second transfer got in without presenting a grant"
+    );
+    assert!(!landed(&d, "second.bin"), "a resumed session wrote a file it was not granted");
 }

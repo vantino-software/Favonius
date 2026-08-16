@@ -189,6 +189,27 @@ pub fn parse_identity_pin(value: &str) -> Result<[u8; 32], String> {
     Ok(out)
 }
 
+/// Parse a variable-length blob given as hex, or as a path to a file
+/// containing hex.
+///
+/// Same two spellings as [`parse_identity_pin`], for the same reason, but
+/// without a fixed length: a grant grows with the paths it names.
+pub fn parse_hex_blob(value: &str) -> Result<Vec<u8>, String> {
+    let trimmed = value.trim();
+    let looks_hex = !trimmed.is_empty()
+        && trimmed.len().is_multiple_of(2)
+        && trimmed.chars().all(|c| c.is_ascii_hexdigit());
+    let hex = if looks_hex {
+        trimmed.to_string()
+    } else {
+        std::fs::read_to_string(trimmed)
+            .map_err(|e| format!("{trimmed} is neither hex nor a readable file ({e})"))?
+            .trim()
+            .to_string()
+    };
+    hex_decode(&hex).ok_or_else(|| format!("{trimmed} does not contain valid hex"))
+}
+
 /// Hex-encode helper (no external dep).
 pub fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()

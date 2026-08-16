@@ -1918,6 +1918,10 @@ async fn handle_transfer(
         capabilities |= ahp_proto::hello::CAP_PEER_AUTH;
     }
 
+    // Set when the sender presented a grant that verified. Its path scope
+    // is applied after the MANIFEST names a destination — see below.
+    let mut permitted_paths: Option<ahp_crypto::grant::VerifiedGrant> = None;
+
     // ── Key exchange + HELLO_ACK ─────────────────────────────────────────
     let hello_flag = if !hello_payload.is_empty() { hello_payload[0] } else { 0x00 };
     // HELLO_ACK payload: [1-byte mode] [mode material (DH material for full
@@ -1935,14 +1939,25 @@ async fn handle_transfer(
         // derived or a socket is committed, so a refused sender costs
         // nothing but the packet it sent.
         let presented = hello.peer_auth.as_ref().map(|(id, sig)| (id, sig));
-        match peer_policy.decide(presented, &peer_public, &peer_nonce) {
-            crate::peer_auth::Decision::Authenticated(id) => {
+        match peer_policy.decide(
+            presented,
+            hello.grant.as_deref(),
+            &peer_public,
+            &peer_nonce,
+            ahp_crypto::grant::now_unix(),
+        ) {
+            crate::peer_auth::Decision::Authenticated { identity, grant } => {
                 tracing::info!(
                     conn_id,
                     peer = %peer,
-                    identity = %ahp_crypto::signatures::hex_encode(&id[..4]),
+                    identity = %ahp_crypto::signatures::hex_encode(&identity[..4]),
+                    run = grant.as_ref().map(|g| g.grant().run_id.clone()),
                     "sender authenticated"
                 );
+                // Held for the path check below: which paths this grant
+                // permits cannot be decided here, because the destination
+                // arrives in the MANIFEST.
+                permitted_paths = grant;
             }
             crate::peer_auth::Decision::Anonymous => {}
             crate::peer_auth::Decision::Refused(why) => {
@@ -1997,6 +2012,32 @@ async fn handle_transfer(
             tracing::info!("encryption: X25519 + AES-256-GCM established (anonymous — no daemon identity)");
         }
         (Some(keys), ack_payload)
+    } else if hello_flag == 0x02 && peer_policy.is_enforcing() {
+        // 0-RTT resume bypasses the authorisation checks entirely, so a
+        // daemon that enforces a policy refuses it and makes the sender do
+        // the full handshake.
+        //
+        // The existing note below is right that a resumed session inherits
+        // *server* authentication from the ticket: the client already chose
+        // to trust that daemon once. It does not follow for the other
+        // direction. A grant carries an expiry and a path prefix; a ticket
+        // carries neither, so honouring one would let a sender that was
+        // authorised for five minutes and one directory keep writing
+        // anywhere under --dest-root for as long as the ticket lived.
+        //
+        // Found by a test that transferred once within its grant and then
+        // wrote outside it, and succeeded: the second HELLO carried a
+        // ticket, so none of the checks above ran.
+        tracing::warn!(
+            conn_id,
+            peer = %peer,
+            "refusing a 0-RTT resume: this daemon enforces a peer policy, and a resumed \
+             session carries no identity or grant to check"
+        );
+        let _ = send_ctrl_with_payload(
+            ctrl_socket, peer, PacketType::Error, conn_id, seq, &[],
+        ).await;
+        return Ok(None);
     } else if hello_flag == 0x02 {
         // 0-RTT resume with session ticket. A successful resume carries the
         // fresh server nonce in the ack; the client mixes it into its key
@@ -2063,6 +2104,30 @@ async fn handle_transfer(
             }
         }
     }
+    // The grant narrows what --dest-root already allows; it never widens
+    // it. Checked after confinement so the path compared is the rewritten
+    // absolute one — comparing the sender's own string would let `..` do
+    // the work the prefix check is there to prevent.
+    if let Some(grant) = &permitted_paths {
+        if !grant.permits_path(&manifest.dest_path) {
+            tracing::warn!(
+                conn_id,
+                peer = %peer,
+                dest = %manifest.dest_path,
+                prefix = %grant.grant().path_prefix,
+                run = %grant.grant().run_id,
+                "rejecting transfer: destination is outside the grant's path prefix"
+            );
+            // Same reason-free ERROR as the handshake refusal: the sender
+            // fails immediately instead of retransmitting its manifest into
+            // silence, and what was permitted stays in this log.
+            let _ = send_ctrl_with_payload(
+                ctrl_socket, peer, PacketType::Error, conn_id, seq, &[],
+            ).await;
+            return Err("destination is outside the permitted path prefix".into());
+        }
+    }
+
     tracing::info!(
         file = %manifest.file_name,
         size = manifest.file_size,
@@ -2385,7 +2450,14 @@ async fn handle_transfer(
         m.packets_sent.inc_by(n_received);
     }
 
-    if session_keys.is_some() && n_received >= manifest.total_chunks {
+    // Not issued at all when a policy is in force: the resume path refuses
+    // such tickets anyway, so handing one out would only teach the sender to
+    // attempt a reconnection this daemon will reject. Declining here keeps
+    // the two ends agreeing about what is possible.
+    if session_keys.is_some()
+        && n_received >= manifest.total_chunks
+        && !peer_policy.is_enforcing()
+    {
         if let Some(ref keys) = session_keys {
             let issued = ticket_key
                 .lock()

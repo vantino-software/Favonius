@@ -1929,6 +1929,9 @@ pub async fn send_file(
     // `None` sends an unauthenticated HELLO — what every client did before
     // this existed.
     client_identity: Option<&ahp_crypto::signatures::SigningIdentity>,
+    // An opaque signed permission, presented alongside the identity. The
+    // client does not read it: it was issued for the daemon to check.
+    grant: Option<&[u8]>,
     // Abort unless the daemon says it checked us. Without it, a daemon too
     // old to understand the appended material completes the transfer
     // happily and the client cannot tell it was never authenticated.
@@ -2024,6 +2027,7 @@ pub async fn send_file(
             &kp.public,
             &local_nonce,
             offer.as_ref().map(|(pk, sig)| (pk, sig)),
+            grant,
         )
     } else {
         vec![0x00] // flags: plaintext
@@ -2535,6 +2539,12 @@ a time; retry when it is free",
         match recv_ctrl(&socket, &mut recv_buf, Duration::from_secs(2)).await {
             Ok(pkt) => match pkt.header.packet_type {
                 PacketType::AckBitmap => { manifest_acked = true; break; }
+                // The daemon refused after reading the manifest — the
+                // destination is outside what it will accept from this
+                // sender. Final, like the handshake refusal: retrying sends
+                // the same manifest to the same answer and then reports a
+                // timeout, which names the wrong problem.
+                PacketType::Error => return Err(DEST_REFUSED.into()),
                 PacketType::ResumeAck => {
                     if pkt.payload.len() > 1 {
                         let prefix = pkt.payload[0];
@@ -4368,6 +4378,11 @@ async fn recv_hello_ack_or_refusal(
     }
 }
 
+/// The daemon accepted this sender but not this destination.
+const DEST_REFUSED: &str = "the daemon refused the destination path: this sender is not \
+permitted to write there. If it runs --require-grant, the grant's path prefix does not \
+cover the destination; its log says what was asked for and what was permitted.";
+
 /// Marker for a refusal, so the retry loop can tell it from a timeout.
 /// Compared by identity of the message, which is why it is a constant.
 const PEER_REFUSED: &str = "the daemon refused this transfer before it began: it did not \
@@ -5389,6 +5404,7 @@ mod tests {
                 false,
                 None,
                 false,
+                None,
                 None,
                 None,
                 false,
