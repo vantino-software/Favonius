@@ -619,6 +619,35 @@ pub(crate) fn confine_dest_path(root: &std::path::Path, dest: &str) -> Result<st
     Ok(joined)
 }
 
+/// Confine against several roots: the destination must be under one of them.
+///
+/// A machine legitimately exposes more than one tree — media on one volume,
+/// archives on another — and a single confinement root can only cover them by
+/// being their common ancestor, which for `/srv/archive` and `/mnt/media` is
+/// `/`. That is the opposite of confinement, so the flag repeats instead.
+///
+/// The first root that accepts the path wins; the error names them all,
+/// because "escapes the configured root" is unhelpful when there are three
+/// and the reader cannot see which they missed.
+pub(crate) fn confine_dest_path_any(
+    roots: &[std::path::PathBuf],
+    dest: &str,
+) -> Result<std::path::PathBuf, String> {
+    for root in roots {
+        if let Ok(path) = confine_dest_path(root, dest) {
+            return Ok(path);
+        }
+    }
+    Err(format!(
+        "destination path {dest} is under none of the configured --dest-root directories ({})",
+        roots
+            .iter()
+            .map(|r| r.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    ))
+}
+
 /// Control-plane datagrams routed to one transfer, by `connection_id`.
 ///
 /// `handle_transfer` used to read MANIFEST and FINISH straight off the
@@ -842,9 +871,14 @@ fn bind_transfer_data_socket(
 /// to the bitmap recv thread during transfers. This prevents the bitmap thread
 /// from consuming HELLOs intended for the control port.
 ///
-/// `dest_root`, when set, confines every transfer destination under that
-/// directory (S1); when unset the daemon honors arbitrary sender-controlled
-/// destination paths (a loud warning is logged at startup).
+/// `dest_roots`, when non-empty, confines every transfer destination under
+/// one of those directories (S1); when empty the daemon honors arbitrary
+/// sender-controlled destination paths (a loud warning is logged at startup).
+///
+/// A list rather than one directory because a machine legitimately exposes
+/// several trees — media on one volume, archives on another — and a single
+/// root can only cover them by being their common ancestor, which is often
+/// `/`. Confinement that has to widen to `/` to be usable is not confinement.
 ///
 /// `identity`, when set, makes the daemon sign every full handshake with its
 /// Ed25519 identity key and carry the signature in HELLO_ACK (S5, RFC §12.2)
@@ -857,27 +891,30 @@ pub async fn run_protocol_listener(
     // keeps the daemon serial on the single `data_addr` port.
     data_port_range: Option<(u16, u16)>,
     max_file_size: Option<u64>,
-    dest_root: Option<std::path::PathBuf>,
+    dest_roots: Vec<std::path::PathBuf>,
     identity: Option<ahp_crypto::signatures::SigningIdentity>,
     peer_policy: crate::peer_auth::PeerPolicy,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Canonicalize the confinement root once: it must exist, and the
     // canonical form is what lexical `starts_with` checks compare against.
-    let dest_root = match dest_root {
-        Some(root) => {
+    let dest_roots: Vec<std::path::PathBuf> = if !dest_roots.is_empty() {
+        let mut canonical = Vec::with_capacity(dest_roots.len());
+        for root in dest_roots {
             let canon = root.canonicalize().map_err(|e| {
                 format!("--dest-root {} cannot be canonicalized: {e}", root.display())
             })?;
             tracing::info!(dest_root = %canon.display(), "destination confinement enabled");
-            Some(canon)
+            canonical.push(canon);
         }
-        None => {
+        canonical
+    } else {
+        {
             tracing::warn!(
                 "no --dest-root configured: the daemon accepts ARBITRARY \
                  destination paths from any peer that can reach the control \
                  port — set --dest-root to confine incoming transfers"
             );
-            None
+            Vec::new()
         }
     };
     // Socket family follows the bind address. These were hardcoded to
@@ -1087,7 +1124,7 @@ split, about (concurrent transfers) x (streams per transfer)",
     // HELLO its receive thread saw mid-flight.
     let new_tx_accept = new_tx.clone();
     // Shared, read-only, for the life of the daemon.
-    let dest_root = dest_root.map(std::sync::Arc::new);
+    let dest_roots = std::sync::Arc::new(dest_roots);
     let identity = std::sync::Arc::new(identity);
     let peer_policy = std::sync::Arc::new(peer_policy);
     {
@@ -1250,7 +1287,7 @@ split, about (concurrent transfers) x (streams per transfer)",
             max_file_size,
             ticket_key.clone(),
             used_tickets.clone(),
-            dest_root.clone(),
+            dest_roots.clone(),
             identity.clone(),
             peer_policy.clone(),
             free_data_socks.clone(),
@@ -1297,7 +1334,7 @@ async fn run_transfer_slot(
     max_file_size: Option<u64>,
     ticket_key: std::sync::Arc<std::sync::Mutex<ahp_crypto::session_ticket::TicketKey>>,
     used_tickets: std::sync::Arc<std::sync::Mutex<ahp_crypto::session_ticket::UsedTicketCache>>,
-    dest_root: Option<std::sync::Arc<std::path::PathBuf>>,
+    dest_roots: std::sync::Arc<Vec<std::path::PathBuf>>,
     identity: std::sync::Arc<Option<ahp_crypto::signatures::SigningIdentity>>,
     peer_policy: std::sync::Arc<crate::peer_auth::PeerPolicy>,
     // Where to return the data socket. Returning it is what bounds the
@@ -1327,7 +1364,7 @@ async fn run_transfer_slot(
             max_file_size,
             &ticket_key,
             &used_tickets,
-            dest_root.as_deref().map(|p| p.as_path()),
+            dest_roots.as_slice(),
             identity.as_ref().as_ref(),
             &peer_policy,
         ),
@@ -1895,7 +1932,7 @@ async fn handle_transfer(
     max_file_size: Option<u64>,
     ticket_key: &std::sync::Arc<std::sync::Mutex<ahp_crypto::session_ticket::TicketKey>>,
     used_tickets: &std::sync::Arc<std::sync::Mutex<ahp_crypto::session_ticket::UsedTicketCache>>,
-    dest_root: Option<&std::path::Path>,
+    dest_roots: &[std::path::PathBuf],
     identity: Option<&ahp_crypto::signatures::SigningIdentity>,
     peer_policy: &crate::peer_auth::PeerPolicy,
 ) -> Result<Option<(u64, SocketAddr)>, Box<dyn std::error::Error + Send + Sync>> {
@@ -2095,8 +2132,8 @@ async fn handle_transfer(
     // Without this the manifest makes the daemon create/truncate/write any
     // path it can reach. The rewritten (absolute, confined) path is used by
     // every consumer below — resume probes, merkle cache, output file.
-    if let Some(root) = dest_root {
-        match confine_dest_path(root, &manifest.dest_path) {
+    if !dest_roots.is_empty() {
+        match confine_dest_path_any(dest_roots, &manifest.dest_path) {
             Ok(confined) => manifest.dest_path = confined.to_string_lossy().into_owned(),
             Err(e) => {
                 tracing::warn!(error = %e, "rejecting transfer: destination escapes dest-root");
@@ -3708,7 +3745,8 @@ fn authenticate_ctrl(
 mod tests {
     use super::{
         apply_resume_bitmap, authenticate_ctrl, build_merkle_resume, build_recv_streams,
-        confine_dest_path, content_fingerprint, decode_resume_bitmap, encode_merkle_cache,
+        confine_dest_path, confine_dest_path_any, content_fingerprint, decode_resume_bitmap,
+        encode_merkle_cache,
         finalize_transfer, hex, lexical_normalize, local_chunk_index, make_header,
         merkle_cache_path, read_merkle_cache, recv_manifest_packet, resume_from_ticket,
         should_rotate, validate_manifest, write_chunk,
@@ -3764,6 +3802,47 @@ mod tests {
             confine_dest_path(root, "/srv/incoming/file.bin").unwrap(),
             std::path::PathBuf::from("/srv/incoming/file.bin")
         );
+    }
+
+    #[test]
+    fn several_roots_each_admit_their_own_paths() {
+        // The case the flag became repeatable for: two trees that share no
+        // useful ancestor.
+        let media = std::path::PathBuf::from("/srv/media");
+        let archive = std::path::PathBuf::from("/mnt/archive");
+        let roots = vec![media.clone(), archive.clone()];
+
+        assert_eq!(
+            confine_dest_path_any(&roots, "show/ep1.mkv").unwrap(),
+            media.join("show/ep1.mkv")
+        );
+        assert_eq!(
+            confine_dest_path_any(&roots, "/mnt/archive/2024/tape.tar").unwrap(),
+            archive.join("2024/tape.tar")
+        );
+    }
+
+    #[test]
+    fn a_path_under_none_of_the_roots_is_refused_and_the_message_names_them() {
+        let roots = vec![
+            std::path::PathBuf::from("/srv/media"),
+            std::path::PathBuf::from("/mnt/archive"),
+        ];
+        let err = confine_dest_path_any(&roots, "/etc/cron.d/pwn").unwrap_err();
+        assert!(err.contains("/srv/media"), "{err}");
+        assert!(err.contains("/mnt/archive"), "{err}");
+    }
+
+    /// Escapes are still escapes when there are several roots: `..` must not
+    /// climb out of one root and into another's parent.
+    #[test]
+    fn an_escape_is_refused_by_every_root() {
+        let roots = vec![
+            std::path::PathBuf::from("/srv/media"),
+            std::path::PathBuf::from("/mnt/archive"),
+        ];
+        assert!(confine_dest_path_any(&roots, "../../etc/passwd").is_err());
+        assert!(confine_dest_path_any(&roots, "/etc/passwd").is_err());
     }
 
     #[test]
