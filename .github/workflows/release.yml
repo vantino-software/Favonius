@@ -23,6 +23,19 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             cross: true
+          # macOS and Windows build on their own runners rather than by
+          # cross-compiling. `ring` and `blake3` compile C and assembly, so
+          # each target needs a C toolchain for *that* target — a Linux host
+          # feeds them its own `cc`, which does not understand
+          # `-mmacosx-version-min` or `/arch:AVX512`. Cross-compiling all of
+          # this from one box does not work, and finding that out at release
+          # time is expensive.
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-13          # the last Intel runner
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -49,24 +62,47 @@ jobs:
       # emits the texts for exactly what is linked into this target's
       # binaries, and fails the job rather than write an empty file.
       - name: Generate third-party licence notices
+        shell: bash
         run: python3 packaging/gen-attribution.py ${{ matrix.target }} THIRD-PARTY-LICENSES.md
 
+      # `shell: bash` on every runner, Windows included: GitHub's Windows
+      # image ships Git Bash, and one packaging script that works everywhere
+      # is worth more than three that drift.
       - name: Package
+        shell: bash
         run: |
+          set -euo pipefail
           d=favonius-${{ github.ref_name }}-${{ matrix.target }}
+          exe=""
+          case "${{ matrix.target }}" in *windows*) exe=".exe" ;; esac
           mkdir -p "$d"
-          cp target/${{ matrix.target }}/release/favonius "$d"/
-          cp target/${{ matrix.target }}/release/favonius-daemon "$d"/
+          cp "target/${{ matrix.target }}/release/favonius$exe" "$d"/
+          cp "target/${{ matrix.target }}/release/favonius-daemon$exe" "$d"/
           # `fvn` is an alias, not a second binary: a relative symlink, so it
           # resolves wherever the directory is unpacked and costs no extra
-          # compile time or bytes. Both release targets are Linux and tar
-          # stores symlinks as symlinks, so it survives the round trip.
-          ln -s favonius "$d"/fvn
+          # compile time or bytes. Unix only — creating a symlink on Windows
+          # needs a privilege the runner does not have, and a copy would be a
+          # second megabyte pretending to be an alias. Windows users get
+          # `favonius.exe`.
+          case "${{ matrix.target }}" in
+            *windows*) : ;;
+            *) ln -s favonius "$d"/fvn ;;
+          esac
           cp README.md LICENSE NOTICE SECURITY.md CHANGELOG.md "$d"/
           cp THIRD-PARTY-LICENSES.md "$d"/
-          cp packaging/favonius-daemon.service "$d"/
+          # A systemd unit is meaningless off Linux, and shipping one is a
+          # small lie about what this platform's install looks like.
+          case "${{ matrix.target }}" in
+            *linux*) cp packaging/favonius-daemon.service "$d"/ ;;
+          esac
           tar czf "$d".tar.gz "$d"
-          sha256sum "$d".tar.gz > "$d".tar.gz.sha256
+          # macOS has `shasum`, Linux and Git Bash have `sha256sum`, and
+          # neither has both.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$d".tar.gz > "$d".tar.gz.sha256
+          else
+            shasum -a 256 "$d".tar.gz > "$d".tar.gz.sha256
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
