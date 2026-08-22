@@ -45,9 +45,17 @@ struct Args {
     #[arg(long, default_value_t = 0)]
     max_file_size_mb: u64,
     /// Confine every transfer destination under this directory. Required
-    /// unless --allow-any-dest is passed (S1)
-    #[arg(long)]
-    dest_root: Option<std::path::PathBuf>,
+    /// unless --allow-any-dest is passed (S1).
+    ///
+    /// Repeatable. A machine legitimately exposes several trees — media on
+    /// one volume, archives on another — and one root can only cover them by
+    /// being their common ancestor, which is frequently `/`. Confinement that
+    /// has to widen to `/` to be usable is not confinement, so the flag
+    /// repeats and a destination must fall under one of the roots given:
+    ///
+    ///     --dest-root /srv/media --dest-root /mnt/archive
+    #[arg(long = "dest-root")]
+    dest_roots: Vec<std::path::PathBuf>,
 
     /// Do not listen for TCP fallback transfers.
     ///
@@ -279,7 +287,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // host with cron, requiring no key and no --encrypt. The daemon warned
     // and continued, which is not enough: the insecure mode was reachable
     // by running the documented command line with a flag left off.
-    if args.dest_root.is_none() && !args.allow_any_dest {
+    if args.dest_roots.is_empty() && !args.allow_any_dest {
         eprintln!(
             "favonius-daemon: refusing to start without --dest-root.\n\
              \n\
@@ -288,6 +296,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
              which is remote code execution.\n\
              \n\
              Confine incoming transfers:\n    --dest-root /srv/incoming\n\
+             \n\
+             The flag repeats if this machine exposes more than one tree:\n\
+             \x20\x20\x20--dest-root /srv/media --dest-root /mnt/archive\n\
              \n\
              If you genuinely intend a daemon that accepts arbitrary paths\n\
              from any peer that can reach it, say so explicitly:\n    --allow-any-dest"
@@ -318,7 +329,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         );
     }
     if !args.no_tcp_fallback && !args.require_peer_auth && !args.require_grant {
-        let fb_root = args.dest_root.clone();
+        // The fallback confines against the first root only: it predates
+        // multiple roots, carries no manifest, and is disabled outright
+        // whenever peer authentication or grants are required — which is
+        // every deployment that would have several.
+        let fb_root = args.dest_roots.first().cloned();
         match tokio::net::TcpListener::bind(control_addr).await {
             Ok(l) => {
                 tokio::spawn(async move {
@@ -358,10 +373,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     } else {
         None
     };
-    let dest_root = args.dest_root.clone();
+    let dest_roots = args.dest_roots.clone();
     tokio::spawn(async move {
         if let Err(e) = ahp_daemon::net_receiver::run_protocol_listener(
-            control_addr, data_addr, max_concurrent, data_port_range, max_file_size, dest_root,
+            control_addr, data_addr, max_concurrent, data_port_range, max_file_size, dest_roots,
             identity, peer_policy,
         ).await {
             tracing::error!("protocol listener failed: {}", e);
@@ -374,7 +389,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut state = AppState::new(if args.max_concurrent > 0 { args.max_concurrent } else { 1024 });
     // The filesystem endpoints (used by `favonius sync` to diff against the
     // destination) are only enabled when a root confines them.
-    if let Some(ref root) = args.dest_root {
+    if let Some(root) = args.dest_roots.first() {
         state = state.with_dest_root(root);
     }
     let listener = TcpListener::bind(&args.listen).await?;
