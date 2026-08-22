@@ -98,7 +98,7 @@ async fn start_daemon(data_ports: u16) -> Option<Daemon> {
     let root = dest_root.clone();
     tokio::spawn(async move {
         let _ = ahp_daemon::net_receiver::run_protocol_listener(
-            control, data, 4, range, None, Some(root), None, Default::default(),
+            control, data, 4, range, None, vec![root], None, Default::default(),
         )
         .await;
     });

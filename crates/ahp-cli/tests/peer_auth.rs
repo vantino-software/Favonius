@@ -119,7 +119,7 @@ async fn start_daemon_inner(policy: PeerPolicy, identity: SigningIdentity) -> Op
             4,
             None,
             None,
-            Some(root),
+            vec![root],
             Some(identity),
             policy,
         )
