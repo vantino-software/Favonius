@@ -48,7 +48,7 @@ dependencies = [
 
 [[package]]
 name = "ahp-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ahp-observability",
  "axum",
@@ -65,7 +65,7 @@ dependencies = [
 
 [[package]]
 name = "ahp-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ahp-api",
  "ahp-compression",
@@ -100,7 +100,7 @@ dependencies = [
 
 [[package]]
 name = "ahp-compression"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "thiserror 2.0.18",
@@ -109,7 +109,7 @@ dependencies = [
 
 [[package]]
 name = "ahp-congestion"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rand 0.8.5",
  "tracing",
@@ -117,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "ahp-crypto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "ahp-daemon"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ahp-api",
  "ahp-compression",
@@ -160,7 +160,7 @@ dependencies = [
 
 [[package]]
 name = "ahp-observability"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "prometheus",
  "tracing",
@@ -169,7 +169,7 @@ dependencies = [
 
 [[package]]
 name = "ahp-platform-net"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "crossbeam-channel",
  "libc",
@@ -181,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "ahp-policy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "rand 0.8.5",
  "serde",
@@ -191,7 +191,7 @@ dependencies = [
 
 [[package]]
 name = "ahp-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bitflags",
  "bytes",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "ahp-sync"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "blake3",
  "thiserror 2.0.18",
@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "ahp-xdp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
  "thiserror 2.0.18",

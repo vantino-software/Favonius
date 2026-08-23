@@ -9,6 +9,8 @@ in a minor release. See [Stability](#stability).
 
 ## Unreleased
 
+## [0.2.0] — 2026-08-23
+
 ### Added
 
 - `favonius check <host:port>` — a connectivity pre-flight. Probes the TCP
@@ -24,6 +26,34 @@ in a minor release. See [Stability](#stability).
   BLAKE3 before committing by rename, and reuses the same `--dest-root`
   confinement as the UDP path. Disable with `--no-tcp-fallback`.
   Senders remain unauthenticated, as on the UDP path.
+- **Peer authentication.** `--require-peer-auth` on the daemon, and
+  `--identity` on both ends: a sender proves which machine it is with an
+  Ed25519 handshake signature, and a receiver publishes an identity a sender
+  can pin. Without it, `--dest-root` answers *where* a stranger may write and
+  nothing answers *who* may.
+- **Run-scoped grants.** `--require-grant` (which implies
+  `--require-peer-auth`), `--trust-anchor` on the daemon, and `--grant` on the
+  client. A sender must carry a capability, signed by a trust anchor and
+  bounded to one destination and one expiry, rather than standing permission
+  to write anywhere under the root for as long as the daemon runs.
+- **`--dest-root` repeats.** A machine legitimately exposes several trees, and
+  one root can only cover them by being their common ancestor — often `/`.
+  Confinement that has to widen to `/` to be usable is not confinement. A
+  destination must fall under one of the roots given; a path under none of
+  them is refused with all of them named.
+- **Releases for macOS and Windows.** `x86_64` and `aarch64` macOS, and
+  `x86_64` Windows, alongside the two Linux targets. Built on their own
+  runners rather than cross-compiled: `ring` and `blake3` compile C and
+  assembly, so each target needs a C toolchain for that target.
+
+### Changed
+
+- Release archives are named for the platform rather than the Rust target
+  triple — `favonius-<version>-x86_64-linux.tar.gz`, not
+  `favonius-<version>-x86_64-unknown-linux-gnu.tar.gz`. The triple names a
+  vendor, and for most platforms that vendor is literally `unknown`.
+- The systemd unit ships only in Linux archives, and the `fvn` symlink only
+  where a symlink is free to create.
 
 
 ## [0.1.0] — 2026-08-15
@@ -276,4 +306,5 @@ possible in a tool that writes files to a path a peer chose.
 - **Rust.** MSRV is 1.87, verified in CI. Raising it is a minor-version
   change.
 
+[0.2.0]: https://github.com/vantino-software/Favonius/releases/tag/v0.2.0
 [0.1.0]: https://github.com/vantino-software/Favonius/releases/tag/v0.1.0
