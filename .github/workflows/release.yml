@@ -30,10 +30,16 @@ jobs:
           # `-mmacosx-version-min` or `/arch:AVX512`. Cross-compiling all of
           # this from one box does not work, and finding that out at release
           # time is expensive.
+          # The same labels the `cross-platform` job in favonius.yml uses,
+          # and pinned for the same reason it pins them: `macos-13` was
+          # retired on 2025-12-04, and a job naming a label that no longer
+          # resolves does not fail — it queues, for ever, reporting nothing.
+          # Three real failures once sat behind that for fourteen hours.
+          # `macos-latest` would move under us the same way.
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: macos-14
           - target: x86_64-apple-darwin
-            os: macos-13          # the last Intel runner
+            os: macos-15-intel     # the last x86_64 image; retires autumn 2027
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     steps:
