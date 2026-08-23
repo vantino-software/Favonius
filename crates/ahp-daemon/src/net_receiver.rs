@@ -4788,21 +4788,39 @@ mod tests {
         }
 
         // Completion burst: the final all-acked ACKs (3 copies), possibly
-        // preceded by a timer ACK. All must report the full contiguous prefix.
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        let burst = collect_packets(&sender);
-        assert!(
-            burst.iter().any(|p| p.header.packet_type == PacketType::AckBitmap),
-            "expected final ACK bitmaps, got {:?}",
-            burst.iter().map(|p| p.header.packet_type).collect::<Vec<_>>()
-        );
-        for p in &burst {
-            if p.header.packet_type == PacketType::AckBitmap {
-                // highest_contiguous at AckBitmap payload bytes 12..20.
-                let hc = u64::from_be_bytes(p.payload[12..20].try_into().unwrap());
-                assert_eq!(hc, CHUNKS - 1, "final ACK must report all chunks");
+        // preceded by a timer ACK.
+        //
+        // The *last* one must report the full contiguous prefix. Not every
+        // one: a timer ACK that fires between two arriving chunks correctly
+        // reports what has arrived so far, and asserting otherwise makes the
+        // test fail on any host where four datagrams take longer to be
+        // processed than the timer takes to tick. It did, on the Intel macOS
+        // runner, reporting `left: 0` — one chunk in, three still in flight,
+        // and the receiver telling the truth about it.
+        //
+        // Polled rather than slept, for the same reason: a fixed 50 ms is a
+        // guess about a machine nobody has measured. The deadline is generous
+        // and the loop exits as soon as the answer is right, so a fast host
+        // pays nothing for it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut last_hc = None;
+        loop {
+            for p in collect_packets(&sender) {
+                if p.header.packet_type == PacketType::AckBitmap {
+                    // highest_contiguous at AckBitmap payload bytes 12..20.
+                    last_hc = Some(u64::from_be_bytes(p.payload[12..20].try_into().unwrap()));
+                }
             }
+            if last_hc == Some(CHUNKS - 1) || std::time::Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        assert_eq!(
+            last_hc,
+            Some(CHUNKS - 1),
+            "the last ACK bitmap should report every chunk; got {last_hc:?}"
+        );
 
         // The bug: before the tail responder, the recv thread exited at
         // completion and these retransmissions hit a deaf port. Now each one
