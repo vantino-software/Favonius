@@ -114,6 +114,13 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    # Only for a tag. `workflow_dispatch` exists to prove the matrix builds —
+    # five targets, three operating systems, and the first run of any of them
+    # is the one that finds the packaging assumption nobody noticed. Attaching
+    # that to a release would publish something nobody asked to publish, named
+    # after a branch. A dispatch leaves its artefacts on the run and nothing
+    # else.
+    if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/download-artifact@v4
         with:
