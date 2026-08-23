@@ -49,6 +49,27 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # A Rust target triple names a vendor, and for most platforms that
+      # vendor is literally `unknown` — so a download was called
+      # `x86_64-unknown-linux-gnu`, which tells somebody choosing a file that
+      # nobody knows who made it. The triple is what the compiler needs; the
+      # file name is what a person reads.
+      - name: Name this platform the way a person would
+        id: platform
+        shell: bash
+        run: |
+          case "${{ matrix.target }}" in
+            x86_64-unknown-linux-gnu)   name=x86_64-linux    ;;
+            aarch64-unknown-linux-gnu)  name=aarch64-linux   ;;
+            x86_64-pc-windows-msvc)     name=x86_64-windows  ;;
+            aarch64-apple-darwin)       name=aarch64-macos   ;;
+            x86_64-apple-darwin)        name=x86_64-macos    ;;
+            # A target nobody has named keeps its triple rather than being
+            # guessed at: a wrong name on a binary is worse than an ugly one.
+            *)                          name="${{ matrix.target }}" ;;
+          esac
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
       - name: Install cross-compiler
         if: matrix.cross
         run: |
@@ -78,7 +99,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          d=favonius-${{ github.ref_name }}-${{ matrix.target }}
+          d=favonius-${{ github.ref_name }}-${{ steps.platform.outputs.name }}
           exe=""
           case "${{ matrix.target }}" in *windows*) exe=".exe" ;; esac
           mkdir -p "$d"
@@ -112,7 +133,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: favonius-${{ matrix.target }}
+          name: favonius-${{ steps.platform.outputs.name }}
           path: |
             *.tar.gz
             *.tar.gz.sha256
@@ -142,7 +163,7 @@ jobs:
 
             Verify a download:
 
-                sha256sum -c favonius-<version>-<target>.tar.gz.sha256
+                sha256sum -c favonius-<version>-<platform>.tar.gz.sha256
 
             These binaries are unsigned. Favonius has not been security
             audited — see SECURITY.md.
