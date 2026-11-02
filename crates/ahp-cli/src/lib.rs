@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod fs_tree;
+pub mod holes;
 pub mod sync_plan;
 pub mod net_probe;
 pub mod preflight;

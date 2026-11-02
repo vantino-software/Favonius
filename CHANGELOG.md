@@ -9,6 +9,42 @@ in a minor release. See [Stability](#stability).
 
 ## Unreleased
 
+### Added
+
+- **Sparse files: holes are not sent.** A daemon advertises the zero-runs
+  capability (HELLO_ACK bit 2). A sender that sees it lists, in the
+  manifest, the runs of chunks lying wholly inside holes of the source
+  (`SEEK_DATA`/`SEEK_HOLE`), and both ends mark them received before data
+  flows. They are not read, sent or written, and stay holes at the
+  destination. The list is bounded by the manifest datagram, so only the
+  runs covering the most chunks are kept; the rest are sent as data. On a
+  resume the daemon punches the runs into the existing file first.
+  `FAVONIUS_ZERO_RUNS=0` disables it on the sender. Older daemons and senders
+  interoperate unchanged.
+
+### Fixed
+
+- **Sending a sparse file from tmpfs filled it in.** The sender reads through
+  a memory mapping, and on tmpfs a read fault on a hole allocates the page,
+  so a 32 GiB sparse image in `/dev/shm` cost 32 GiB of memory to send. Holes
+  are now never read through the mapping: not sent when the daemon supports
+  zero runs, skipped by the prefetcher, and hashed as zeros in resume mode.
+  Against an older daemon, chunks in holes are still read to be sent.
+- **A resume onto a stale copy kept the stale data.** With no valid Merkle
+  cache beside the destination, the daemon built a tree from the file and
+  then did not use it: it counted every chunk that was not all zeros as
+  already present. A same-size older copy was therefore kept almost
+  entirely, and the sender reported success, because the daemon's
+  whole-file hash check runs after the sender has gone. The daemon now hands
+  the sender the tree it built, exactly as for a cache hit, and only chunks
+  that match are skipped. The README described this case as a per-chunk
+  hash comparison; it now says what happens.
+
+### Known limits
+
+- The sender is not told the outcome of the daemon's final whole-file hash
+  check; a mismatch is reported only in the daemon's log.
+
 ## [0.2.0] — 2026-08-23
 
 ### Added

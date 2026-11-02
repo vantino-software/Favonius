@@ -42,6 +42,7 @@ pub mod header;
 pub mod hello;
 pub mod packet_type;
 pub mod tlv;
+pub mod zero_runs;
 
 // ── Re-exports for convenience ────────────────────────────────────────────
 
@@ -54,7 +55,7 @@ pub use header::{update_crc, PacketHeader, HEADER_SIZE, PROTOCOL_VERSION};
 pub use hello::{
     decode_hello_ack_payload, encode_hello_ack_payload, encode_hello_ack_resumed,
     data_port_count, per_stream_ports,
-    HelloAckMode, CAPABILITY_MAGIC, CAP_NONE, CAP_PER_STREAM_PORTS,
+    HelloAckMode, CAPABILITY_MAGIC, CAP_NONE, CAP_PER_STREAM_PORTS, CAP_ZERO_RUNS,
     HelloAckPayload,
 };
 pub use packet_type::PacketType;
