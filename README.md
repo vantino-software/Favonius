@@ -28,6 +28,8 @@ move files in production, read [SECURITY.md](SECURITY.md) first and expect
 - **Compressed** — per-chunk zstd with a per-packet flag
   (`--compression balanced`)
 - **Resumable** — a Merkle tree diff skips unchanged chunks (`--resume`)
+- **Sparse-aware** — holes in a sparse source are neither read nor sent,
+  and stay holes at the destination; see [Sparse files](#sparse-files)
 - **Directories and sync** — recursive tree transfer with glob filters;
   stateless one-way, mirror and append-only sync
 - **IPv4 everywhere, IPv6 on Linux** — with hostname resolution
@@ -328,9 +330,42 @@ size. Treat the seconds as indicative, not as a benchmark result.
 2. Daemon checks for cached Merkle tree at destination:
    - **Roots match** → instant skip (0 packets, <1s)
    - **Cached tree exists, roots differ** → exchange strategic-level hashes, identify differing subtrees
-   - **No cache** → per-chunk hash comparison (first time), cache built for future
+   - **No valid cache** → the daemon builds the tree from the file it has
+     (one pass over it), caches it, and the strategic-level hashes are
+     diffed as above
 3. Only differing chunks are transferred
-4. Post-transfer BLAKE3 whole-file verification
+4. Post-transfer BLAKE3 whole-file verification on the daemon. The sender
+   has finished by then and is not told the verdict: a mismatch is logged by
+   the daemon as an error, the file is left in place and its Merkle cache is
+   removed. Check the daemon's log, or hash the destination, when the result
+   matters.
+
+### Sparse files
+
+A hole in a sparse file (a VM image, a database file with preallocated
+space) reads as zeros and occupies no storage. Favonius does not send it.
+The sender asks the filesystem where the holes are (`SEEK_DATA` and
+`SEEK_HOLE`) and lists, in the manifest, the runs of chunks that lie wholly
+inside them. Both ends mark those chunks received before any data flows: they
+are never read, framed, paced or acknowledged, and they stay holes in the
+destination file. A chunk only partly inside a hole is sent as usual.
+
+- **Negotiated.** A daemon advertises the zero-runs capability in HELLO_ACK
+  (bit 2); a sender uses it only then. Older daemons receive every byte, as
+  before. `FAVONIUS_ZERO_RUNS=0` turns it off on the sender.
+- **Bounded by one datagram.** The list travels in the manifest, which is a
+  single control packet, so the sender keeps the runs covering the most
+  chunks and sends the rest of the holes as data. That costs bandwidth,
+  never correctness. A file with a few large holes, the usual case, loses
+  nothing to the bound.
+- **Resume.** When resuming onto an existing destination, the daemon punches
+  the runs into holes (overwriting them with zeros where it cannot), so
+  bytes an earlier attempt left there do not survive.
+- **The source stays sparse.** Holes are stepped over by the prefetcher and
+  fed to the hashers as zeros rather than read through the mapping; on
+  tmpfs, reading a hole through a mapping allocates it.
+- **Linux and macOS.** Elsewhere, or on a filesystem that reports no holes,
+  every byte is sent.
 
 ### Resume performance
 

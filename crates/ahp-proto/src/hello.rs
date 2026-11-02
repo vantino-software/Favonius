@@ -128,6 +128,15 @@ pub const CAP_PER_STREAM_PORTS: u32 = 1 << 0;
 /// what peer authentication is.
 pub const CAP_PEER_AUTH: u32 = 1 << 1;
 
+/// Bit 2: the daemon accepts `zero_runs` in the MANIFEST: runs of chunks the
+/// sender will not send because they lie wholly inside holes of the source
+/// file, and which the daemon is to treat as received zeros.
+///
+/// Gated on a bit rather than a manifest tag alone because it changes what
+/// "complete" means: a daemon that ignored the field would wait for chunks
+/// that never come. See [`crate::zero_runs`].
+pub const CAP_ZERO_RUNS: u32 = 1 << 2;
+
 /// Bits 8..16 of the capability bitfield: how many contiguous data ports are
 /// reserved, counting the advertised one.
 const DATA_PORT_COUNT_SHIFT: u32 = 8;

@@ -92,6 +92,10 @@ pub struct TransferStats {
     /// deliberately broken, because it never noticed the split had silently
     /// not happened.
     pub data_ports: usize,
+    /// Chunks never sent because they lie wholly inside holes of the source
+    /// file (`zero_runs`). Reported so a test can tell "the file arrived"
+    /// from "the file arrived without its holes crossing the wire".
+    pub zero_chunks_skipped: u64,
 }
 
 impl TransferStats {
@@ -159,6 +163,12 @@ pub struct FileManifest {
     /// See the per-stream data ports section of the README.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub features: Vec<String>,
+    /// Runs of chunks, `[first, count]`, that lie wholly inside holes of the
+    /// source and are not sent; the daemon treats them as received zeros.
+    /// Only when the daemon advertised `CAP_ZERO_RUNS`. See
+    /// `ahp_proto::zero_runs`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zero_runs: Vec<ahp_proto::zero_runs::ZeroRun>,
 }
 
 fn default_resume_mode() -> String { "none".into() }
@@ -2367,6 +2377,13 @@ a time; retry when it is free",
         None
     };
     let file_data: &[u8] = file_map.as_deref().unwrap_or(&[]);
+    // Where the source's holes are. Read before anything touches the
+    // mapping: every consumer below steps over them, because a hole read
+    // through a mapping is not free (on tmpfs it allocates the page, so a
+    // sparse source would fill in just by being sent).
+    let holes = if file_size > 0 { crate::holes::holes(&src_file, file_size) } else { Vec::new() };
+    let use_zero_runs = hello_ack.capabilities & ahp_proto::CAP_ZERO_RUNS != 0
+        && std::env::var("FAVONIUS_ZERO_RUNS").map_or(true, |v| v != "0");
     // Zero-copy eligibility message printed later when sender is selected.
     let total_chunks = file_size.div_ceil(payload_size as u64);
 
@@ -2394,6 +2411,7 @@ a time; retry when it is free",
         let join = if file_size > 0 {
             let pf_file = std::fs::File::open(source)?;
             let (stop2, pos2) = (stop.clone(), pos.clone());
+            let pf_holes = holes.clone();
             Some(std::thread::spawn(move || {
                 use std::os::unix::fs::FileExt;
                 let mut buf = vec![0u8; 1024 * 1024];
@@ -2402,6 +2420,14 @@ a time; retry when it is free",
                     if off >= pos2.load(Ordering::Relaxed).saturating_add(PREFETCH_AHEAD) {
                         std::thread::sleep(Duration::from_millis(2));
                         continue;
+                    }
+                    // Step over a hole: there is nothing to warm in it.
+                    let i = pf_holes.partition_point(|&(o, l)| o + l <= off);
+                    if let Some(&(o, l)) = pf_holes.get(i) {
+                        if o <= off {
+                            off = o + l;
+                            continue;
+                        }
                     }
                     match pf_file.read_at(&mut buf, off) {
                         Ok(0) | Err(_) => break,
@@ -2434,13 +2460,31 @@ a time; retry when it is free",
         let mut hasher = blake3::Hasher::new();
         // Zero payload size mirrors build_file_merkle: an empty tree.
         let mut builder = ahp_sync::merkle::FileMerkleBuilder::new(payload_size).ok();
+        // Holes are fed as zeros from this buffer rather than read through
+        // the mapping; the result is identical, and the hole stays a hole.
+        static ZEROS: [u8; 64 * 1024] = [0u8; 64 * 1024];
         let mut offset = 0usize;
         while offset < file_data.len() {
             let end = (offset + SETUP_WINDOW).min(file_data.len());
-            let window = &file_data[offset..end];
-            hasher.update(window);
-            if let Some(ref mut b) = builder {
-                b.update(window);
+            for (in_hole, s, e) in crate::holes::segments(&holes, offset as u64, end as u64) {
+                let (s, e) = (s as usize, e as usize);
+                if in_hole {
+                    let mut p = s;
+                    while p < e {
+                        let n = (e - p).min(ZEROS.len());
+                        hasher.update(&ZEROS[..n]);
+                        if let Some(ref mut b) = builder {
+                            b.update(&ZEROS[..n]);
+                        }
+                        p += n;
+                    }
+                } else {
+                    let window = &file_data[s..e];
+                    hasher.update(window);
+                    if let Some(ref mut b) = builder {
+                        b.update(window);
+                    }
+                }
             }
             #[cfg(target_os = "linux")]
             {
@@ -2501,7 +2545,7 @@ a time; retry when it is free",
         );
     }
 
-    let manifest = serde_json::to_vec(&FileManifest {
+    let mut manifest_fields = FileManifest {
         file_name,
         file_size,
         dest_path: dest_path.into(),
@@ -2526,7 +2570,32 @@ a time; retry when it is free",
         } else {
             Vec::new()
         },
-    })?;
+        zero_runs: Vec::new(),
+    };
+    // Zero runs go in whatever room the MANIFEST datagram has left: it is
+    // one control packet, and the daemon reads it into a MAX_PACKET buffer.
+    // The runs covering the most chunks are kept; the rest of the holes are
+    // sent as data, which costs bandwidth and nothing else.
+    if use_zero_runs && !holes.is_empty() {
+        let runs = ahp_proto::zero_runs::runs_in_holes(&holes, file_size, payload_size as u64);
+        if !runs.is_empty() {
+            let base = serde_json::to_vec(&manifest_fields)?.len();
+            // `,"zero_runs":` plus slack for the "zero-runs" feature tag.
+            let overhead = HEADER_SIZE + base + r#","zero_runs":"#.len() + 32;
+            let budget = MAX_PACKET.saturating_sub(overhead);
+            let kept = ahp_proto::zero_runs::fit(&runs, budget);
+            if kept.len() < runs.len() {
+                tracing::info!(runs = runs.len(), kept = kept.len(),
+                    "zero runs: the manifest has room for the largest only; the rest are sent");
+            }
+            if !kept.is_empty() {
+                manifest_fields.features.push("zero-runs".to_string());
+                manifest_fields.zero_runs = kept;
+            }
+        }
+    }
+    let zero_runs = manifest_fields.zero_runs.clone();
+    let manifest = serde_json::to_vec(&manifest_fields)?;
     // Send MANIFEST with retries. Accept AckBitmap (normal) or ResumeAck (resume).
     let mut manifest_acked = false;
     let mut resume_bitmap: Option<Vec<u8>> = None;
@@ -2757,6 +2826,26 @@ a time; retry when it is free",
             skipped = chunks_skipped, total = total_chunks,
             "resume: skipping {}/{} chunks", chunks_skipped, total_chunks
         );
+    }
+
+    // Chunks inside holes are done before they start: never read, never
+    // sent. The daemon marks the same runs received from the manifest.
+    let mut zero_chunks_skipped: u64 = 0;
+    for &[first, count] in &zero_runs {
+        for global in first..first + count {
+            if let Some(stream) = streams
+                .iter_mut()
+                .find(|s| global >= s.chunk_base && global < s.chunk_base + s.chunk_count)
+            {
+                if stream.mark_acked((global - stream.chunk_base) as usize) {
+                    zero_chunks_skipped += 1;
+                }
+            }
+        }
+    }
+    if zero_chunks_skipped > 0 {
+        tracing::info!(skipped = zero_chunks_skipped, total = total_chunks,
+            "zero runs: {zero_chunks_skipped} of {total_chunks} chunks are holes and are not sent");
     }
 
     let start = Instant::now();
@@ -4113,6 +4202,7 @@ spread={:.2}s ({:.1}% of transfer) [{}]",
         profile,
         policy_params,
         data_ports: n_dest,
+        zero_chunks_skipped,
     })
 }
 
@@ -6072,8 +6162,10 @@ mod tests {
             file_hash: None,
             merkle_root: None,
             features: Vec::new(),
+            zero_runs: Vec::new(),
         };
         let json = serde_json::to_string(&m).unwrap();
         assert!(!json.contains("features"), "empty features must be omitted: {json}");
+        assert!(!json.contains("zero_runs"), "no zero runs must be omitted too: {json}");
     }
 }

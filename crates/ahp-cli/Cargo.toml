@@ -67,6 +67,11 @@ libc = "0.2"
 [target.'cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
 io-uring = "0.7"
 
+# `libc` on macOS backs hole detection (`holes.rs`, `SEEK_DATA`/`SEEK_HOLE`),
+# the one use of it outside Linux.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
 ahp-api = { workspace = true }

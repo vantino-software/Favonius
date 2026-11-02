@@ -31,16 +31,20 @@ const ACK_EVERY: u64 = 128;
 
 /// Capabilities every transfer advertises regardless of what it was given.
 ///
-/// Still empty: the only capability this daemon has to offer is per-stream
-/// data ports, and that one is *per transfer* — it depends on the run the
-/// pool could spare at HELLO time, so it is OR-ed in by `handle_transfer`
-/// rather than being a constant. See
+/// Zero runs (`CAP_ZERO_RUNS`): the sender may name chunks inside holes of
+/// its source, which this daemon marks received as zeros. Per-stream data
+/// ports are *per transfer* — they depend on the run the pool could spare at
+/// HELLO time, so that bit is OR-ed in by `handle_transfer`. See
 /// the per-stream data ports section of the README.
-const DAEMON_CAPABILITIES: u32 = ahp_proto::CAP_NONE;
+const DAEMON_CAPABILITIES: u32 = ahp_proto::CAP_ZERO_RUNS;
 
 /// Feature tags this daemon understands in a manifest's `features` list.
 /// An unknown tag is informational, never fatal.
-const KNOWN_FEATURES: &[&str] = &[FEATURE_PER_STREAM_PORTS];
+const KNOWN_FEATURES: &[&str] = &[FEATURE_PER_STREAM_PORTS, FEATURE_ZERO_RUNS];
+
+/// The sender listed `zero_runs` in the manifest. The runs themselves are
+/// what the daemon acts on; the tag makes them visible in the log.
+const FEATURE_ZERO_RUNS: &str = "zero-runs";
 
 /// The sender reports back, in the MANIFEST, that it actually took up the
 /// per-stream port run this daemon advertised. Purely diagnostic — the
@@ -139,6 +143,12 @@ struct FileManifest {
     /// See the per-stream data ports section of the README.
     #[serde(default)]
     features: Vec<String>,
+    /// Runs of chunks, `[first, count]`, wholly inside holes of the source:
+    /// never sent, marked received here, and zero in the output file. Sent
+    /// only to a daemon advertising `CAP_ZERO_RUNS`. See
+    /// `ahp_proto::zero_runs`.
+    #[serde(default)]
+    zero_runs: Vec<ahp_proto::zero_runs::ZeroRun>,
 }
 
 fn default_ack_mode() -> ahp_proto::data::AckMode {
@@ -256,6 +266,70 @@ fn apply_resume_bitmap(streams: &mut [StreamRecvState], bitmap: &[u8]) -> u64 {
     total_skipped
 }
 
+/// Mark the chunks of `runs` received: the sender will not send them,
+/// because they lie inside holes of its source. Chunks a resume already
+/// marked are left alone, so each counts once. Returns chunks marked.
+fn apply_zero_runs(streams: &mut [StreamRecvState], runs: &[ahp_proto::zero_runs::ZeroRun]) -> u64 {
+    let mut marked = 0u64;
+    for &[first, count] in runs {
+        for global in first..first + count {
+            let Some(stream) = streams
+                .iter_mut()
+                .find(|s| global >= s.chunk_base && global < s.chunk_base + s.chunk_count)
+            else {
+                continue;
+            };
+            let local = (global - stream.chunk_base) as usize;
+            if !stream.received[local] {
+                stream.mark_received(local);
+                marked += 1;
+            }
+        }
+    }
+    marked
+}
+
+/// Make `ranges` of an existing output file zero, for a resumed transfer
+/// whose zero runs will not be sent: whatever an earlier attempt left there
+/// must not survive. Linux punches holes, which keeps the file sparse; where
+/// that is unavailable or fails, bytes that are not already zero are
+/// overwritten through `mmap`.
+fn zero_existing_ranges(
+    file: &std::fs::File,
+    mmap: &mut [u8],
+    ranges: &[(u64, u64)],
+) {
+    for &(off, len) in ranges {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::io::AsRawFd;
+            // SAFETY: fallocate on a descriptor we hold open, over a range
+            // inside the file (validated against file_size by the caller).
+            let r = unsafe {
+                nix::libc::fallocate(
+                    file.as_raw_fd(),
+                    nix::libc::FALLOC_FL_PUNCH_HOLE | nix::libc::FALLOC_FL_KEEP_SIZE,
+                    off as nix::libc::off_t,
+                    len as nix::libc::off_t,
+                )
+            };
+            if r == 0 {
+                continue;
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = file;
+        let (s, e) = (off as usize, (off + len) as usize);
+        if e <= mmap.len() {
+            for chunk in mmap[s..e].chunks_mut(64 * 1024) {
+                if chunk.iter().any(|&b| b != 0) {
+                    chunk.fill(0);
+                }
+            }
+        }
+    }
+}
+
 /// Decode and validate a sender-reported resume bitmap (RESUME_REQ payload,
 /// zstd-compressed like the daemon's own ResumeAck bitmap exchange). The
 /// bitmap must cover exactly `total_chunks` bits: a wrong-sized bitmap would
@@ -314,6 +388,8 @@ fn validate_manifest(m: &FileManifest, max_file_size: Option<u64>) -> Result<(),
             m.total_chunks, m.file_size, m.payload_size, expected_chunks
         ));
     }
+    ahp_proto::zero_runs::validate(&m.zero_runs, m.total_chunks)
+        .map_err(|e| format!("invalid zero runs: {e}"))?;
     Ok(())
 }
 
@@ -1473,12 +1549,13 @@ fn build_resume_bitmap(manifest: &FileManifest) -> Option<Vec<u8>> {
     Some(bitmap)
 }
 
-/// Merkle resume result: either a precomputed bitmap (roots match or no cache)
-/// or a "merkle_diff" payload with cached tree level hashes for the sender to diff.
+/// Merkle resume result: either an all-present bitmap (roots match) or a
+/// "merkle_diff" payload with the local tree's level hashes for the sender
+/// to diff.
 enum MerkleResumeResult {
-    /// Ready bitmap (all-ones if roots match, or per-chunk from hashing).
+    /// All-ones bitmap: the roots match.
     Bitmap(Vec<u8>),
-    /// Cached tree level hashes for sender-side diff.
+    /// Local tree level hashes (cached or freshly built) for sender-side diff.
     /// Format: [1-byte level] [hashes at that level, 32 bytes each], zstd-compressed.
     MerkleDiff(Vec<u8>),
 }
@@ -1601,7 +1678,8 @@ fn read_merkle_cache(
 
 /// Build resume data using Merkle tree.
 /// Returns a bitmap if roots match (instant skip) or level hashes if a cached
-/// tree exists (sender does the diff). Falls back to per-chunk hashing if no cache.
+/// tree exists (sender does the diff). Without a valid cache the tree is built
+/// from the file (O(N) hashing) and diffed the same way.
 fn build_merkle_resume(manifest: &FileManifest) -> Option<MerkleResumeResult> {
     let path = std::path::Path::new(&manifest.dest_path);
     let metadata = std::fs::metadata(path).ok()?;
@@ -1639,23 +1717,7 @@ fn build_merkle_resume(manifest: &FileManifest) -> Option<MerkleResumeResult> {
         // sender-side diff. The sender compares these against its own tree
         // and computes which subtrees differ → which leaves need retransmit.
         // This avoids O(N) hashing on the daemon!
-        let (level, count) = tree.strategic_level();
-        let level_hashes = tree.level(level);
-        tracing::info!(
-            level, count, local_root = %hex::encode(tree.root()),
-            sender_root = %sender_root_hex,
-            "merkle resume: sending level {} hashes for sender-side diff", level
-        );
-
-        // Encode: [1-byte level] [4-byte leaf_count] [count × 32-byte hashes]
-        let mut payload = Vec::with_capacity(5 + count * 32);
-        payload.push(level as u8);
-        payload.extend_from_slice(&(tree.leaf_count() as u32).to_le_bytes());
-        for h in level_hashes {
-            payload.extend_from_slice(h);
-        }
-        let compressed = zstd::encode_all(payload.as_slice(), 1).unwrap_or(payload);
-        return Some(MerkleResumeResult::MerkleDiff(compressed));
+        return Some(merkle_diff(tree, sender_root_hex));
     }
 
     // No cached tree — fall back to building one from the file (O(N) hashing).
@@ -1679,23 +1741,32 @@ fn build_merkle_resume(manifest: &FileManifest) -> Option<MerkleResumeResult> {
         return Some(MerkleResumeResult::Bitmap(bm));
     }
 
-    // We need the SENDER's tree to diff, but we only have the root.
-    // Fall back to per-chunk zero-check for the first time.
-    let total = manifest.total_chunks as usize;
-    let n = (total + 7) / 8;
-    let mut bm = vec![0u8; n];
-    let mut have = 0;
-    for ci in 0..total {
-        let offset = ci * manifest.payload_size;
-        let end = (offset + manifest.payload_size).min(existing.len());
-        if existing[offset..end].iter().any(|&b| b != 0) {
-            bm[ci / 8] |= 1 << (ci % 8);
-            have += 1;
-        }
+    // Roots differ: hand the sender the tree just built, exactly as for a
+    // cache hit. Guessing from content instead (keep every non-zero chunk)
+    // kept stale data whenever an older copy of the same size was already
+    // there.
+    Some(merkle_diff(&local_tree, sender_root_hex))
+}
+
+/// The sender-side diff payload for a local tree whose root differs from
+/// the sender's: `[1-byte level] [4-byte leaf_count] [count × 32-byte
+/// hashes]` at the tree's strategic level, zstd-compressed.
+fn merkle_diff(tree: &ahp_sync::merkle::MerkleTree, sender_root_hex: &str) -> MerkleResumeResult {
+    let (level, count) = tree.strategic_level();
+    let level_hashes = tree.level(level);
+    tracing::info!(
+        level, count, local_root = %hex::encode(tree.root()),
+        sender_root = %sender_root_hex,
+        "merkle resume: sending level {} hashes for sender-side diff", level
+    );
+    let mut payload = Vec::with_capacity(5 + count * 32);
+    payload.push(level as u8);
+    payload.extend_from_slice(&(tree.leaf_count() as u32).to_le_bytes());
+    for h in level_hashes {
+        payload.extend_from_slice(h);
     }
-    tracing::info!(have, total, "merkle resume: first-time fallback, {}/{} chunks", have, total);
-    if have == 0 { return None; }
-    Some(MerkleResumeResult::Bitmap(bm))
+    let compressed = zstd::encode_all(payload.as_slice(), 1).unwrap_or(payload);
+    MerkleResumeResult::MerkleDiff(compressed)
 }
 
 /// Hex-encode helper (no external dep).
@@ -2323,6 +2394,22 @@ async fn handle_transfer(
     if let Some(ref bitmap) = resume_bitmap {
         let total_skipped = apply_resume_bitmap(&mut streams, bitmap);
         tracing::info!(skipped = total_skipped, "pre-populated received bitmap from resume");
+    }
+
+    // Zero runs: chunks inside holes of the source, which will not be sent.
+    // A fresh output file was just truncated and extended, so those ranges
+    // are already holes; an existing one being resumed may hold anything
+    // there, and is zeroed first.
+    if !manifest.zero_runs.is_empty() {
+        if resume_bitmap.is_some() {
+            let ranges = ahp_proto::zero_runs::byte_ranges(
+                &manifest.zero_runs, manifest.file_size, manifest.payload_size as u64,
+            );
+            let len = manifest.file_size as usize;
+            zero_existing_ranges(&dest_file, &mut mmap[..len], &ranges);
+        }
+        let marked = apply_zero_runs(&mut streams, &manifest.zero_runs);
+        tracing::info!(marked, runs = manifest.zero_runs.len(), "zero runs: chunks in holes, not sent");
     }
 
     // Poll only the ports this transfer can actually receive on.
@@ -3744,13 +3831,13 @@ fn authenticate_ctrl(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_resume_bitmap, authenticate_ctrl, build_merkle_resume, build_recv_streams,
+        apply_resume_bitmap, apply_zero_runs, zero_existing_ranges, authenticate_ctrl, build_merkle_resume, build_recv_streams,
         confine_dest_path, confine_dest_path_any, content_fingerprint, decode_resume_bitmap,
         encode_merkle_cache,
         finalize_transfer, hex, lexical_normalize, local_chunk_index, make_header,
         merkle_cache_path, read_merkle_cache, recv_manifest_packet, resume_from_ticket,
         should_rotate, validate_manifest, write_chunk,
-        FileManifest, MerkleResumeResult, MAX_NUM_STREAMS, MAX_TOTAL_CHUNKS,
+        FileManifest, MmapMut, MerkleResumeResult, MAX_NUM_STREAMS, MAX_TOTAL_CHUNKS,
     };
     use ahp_crypto::session_ticket::{
         derive_resumed_keys, encode_ticket, TicketKey, UsedTicketCache, DEFAULT_TICKET_TTL,
@@ -4114,7 +4201,44 @@ mod tests {
             file_hash: None,
             merkle_root: None,
             features: Vec::new(),
+            zero_runs: Vec::new(),
         }
+    }
+
+    #[test]
+    fn zero_runs_are_validated_with_the_manifest() {
+        let mut m = manifest(10 * 1350, 1350, 10);
+        m.zero_runs = vec![[2, 3], [7, 3]];
+        assert!(validate_manifest(&m, None).is_ok());
+        m.zero_runs = vec![[8, 3]];
+        assert!(validate_manifest(&m, None).unwrap_err().contains("zero runs"));
+    }
+
+    #[test]
+    fn zero_runs_mark_chunks_received_once_across_streams() {
+        let mut streams = build_recv_streams(10, 3); // 4 + 3 + 3
+        streams[0].mark_received(1); // a resume already had chunk 1
+        let marked = apply_zero_runs(&mut streams, &[[0, 2], [3, 5]]);
+        assert_eq!(marked, 6, "chunk 1 was already received");
+        assert_eq!(streams.iter().map(|s| s.n_received).sum::<u64>(), 7);
+        assert!(streams[1].received.iter().all(|&r| r), "chunks 4..7 are stream 1");
+        assert!(!streams[2].received[1], "chunk 8 is not in a run");
+    }
+
+    #[test]
+    fn a_resumed_files_zero_runs_are_zeroed() {
+        let path = std::env::temp_dir().join(format!("favonius-zero-{:016x}", rand::random::<u64>()));
+        std::fs::write(&path, vec![9u8; 8192]).unwrap();
+        let f = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        let mut map = unsafe { MmapMut::map_mut(&f).unwrap() };
+        zero_existing_ranges(&f, &mut map[..], &[(1000, 3000)]);
+        map.flush().unwrap();
+        drop(map);
+        let back = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+        assert!(back[..1000].iter().all(|&b| b == 9));
+        assert!(back[1000..4000].iter().all(|&b| b == 0), "the run was zeroed");
+        assert!(back[4000..].iter().all(|&b| b == 9));
     }
 
     #[test]
@@ -4252,12 +4376,24 @@ mod tests {
         hex::encode(ahp_sync::merkle::build_file_merkle(data, payload_size).root())
     }
 
-    /// Content B: same size as A but different, with some all-zero chunks so
-    /// the first-time fallback bitmap is distinguishable from all-ones.
+    /// Content B: same size as A but different, with some all-zero chunks.
     const B12_A: [u8; 16] = [0xAA; 16];
     const B12_B: [u8; 16] = [1, 1, 1, 1, 0, 0, 0, 0, 2, 2, 2, 2, 0, 0, 0, 0];
-    /// Zero-check fallback for B12_B: chunks 0 and 2 present → 0b00000101.
-    const B12_B_FALLBACK: [u8; 1] = [0x05];
+
+    /// Asserts `result` is a Merkle diff built from `local` — the content
+    /// actually on disk — so the sender diffs against the truth.
+    fn expect_diff_of(result: Option<MerkleResumeResult>, local: &[u8]) {
+        let Some(MerkleResumeResult::MerkleDiff(z)) = result else {
+            panic!("expected a merkle diff resume result");
+        };
+        let payload = zstd::decode_all(z.as_slice()).unwrap();
+        let tree = ahp_sync::merkle::build_file_merkle(local, 4);
+        let (level, _) = tree.strategic_level();
+        assert_eq!(payload[0] as usize, level);
+        assert_eq!(u32::from_le_bytes(payload[1..5].try_into().unwrap()) as usize, tree.leaf_count());
+        let hashes: Vec<u8> = tree.level(level).iter().flat_map(|h| h.iter().copied()).collect();
+        assert_eq!(&payload[5..], hashes.as_slice(), "diff must describe the file on disk");
+    }
 
     fn expect_bitmap(result: Option<MerkleResumeResult>) -> Vec<u8> {
         match result {
@@ -4291,9 +4427,8 @@ mod tests {
         std::fs::write(&m.dest_path, B12_B).unwrap();
 
         // The stale cache must NOT bless B as "all chunks present": the
-        // resume falls back to per-chunk detection instead of all-ones.
-        let bm = expect_bitmap(build_merkle_resume(&m));
-        assert_eq!(bm, B12_B_FALLBACK, "stale cache must miss and trigger a fresh diff");
+        // miss rebuilds the tree from B and hands it over for a real diff.
+        expect_diff_of(build_merkle_resume(&m), &B12_B);
 
         // The miss re-cached the tree for B: resuming against B's root now
         // hits the fast path...
@@ -4304,11 +4439,7 @@ mod tests {
         // ...and a sender holding different content gets a real Merkle diff
         // computed from the validated cache, not skipped chunks.
         m.merkle_root = Some(merkle_root_hex(&B12_A, 4));
-        match build_merkle_resume(&m) {
-            Some(MerkleResumeResult::MerkleDiff(_)) => {}
-            other => panic!("expected a merkle diff for differing roots, got bitmap: {:?}",
-                matches!(other, Some(MerkleResumeResult::Bitmap(_)))),
-        }
+        expect_diff_of(build_merkle_resume(&m), &B12_B);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -4330,8 +4461,7 @@ mod tests {
 
         // Size and mtime both match; the head/tail fingerprint must still
         // force a miss.
-        let bm = expect_bitmap(build_merkle_resume(&m));
-        assert_eq!(bm, B12_B_FALLBACK, "mtime match must not rescue a stale cache");
+        expect_diff_of(build_merkle_resume(&m), &B12_B);
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -4357,8 +4487,7 @@ mod tests {
 
         for blob in [bare, b"junk".to_vec(), truncated_envelope, truncated_tree] {
             std::fs::write(&cache_path, blob).unwrap();
-            let bm = expect_bitmap(build_merkle_resume(&m));
-            assert_eq!(bm, B12_B_FALLBACK, "malformed cache must be a clean miss");
+            expect_diff_of(build_merkle_resume(&m), &B12_B);
         }
 
         std::fs::remove_dir_all(&dir).ok();
