@@ -9,6 +9,31 @@ in a minor release. See [Stability](#stability).
 
 ## Unreleased
 
+### Fixed
+
+- **A Windows daemon refused every drive-letter destination.** It
+  canonicalizes its `--dest-root` to the verbatim form (`\\?\C:\...`), and
+  a destination written `C:\...` never compared as being under it, so every
+  transfer to a Windows path was rejected as escaping the root. The sender
+  was not told and timed out. Confinement now compares both without the
+  verbatim prefix and with the drive letter in upper case; the rest of the
+  path is still compared exactly.
+- **The CLI refused a Windows destination path.** `host:port:C:\path` (or
+  `C:/path`) is now accepted; `C:path`, relative to a drive's current
+  directory on the daemon's machine, is still refused.
+- **A grant's path prefix did not match on a Windows daemon.** The check
+  compared strings with `/` as the only separator. On Windows both slashes
+  now separate and a drive letter's case does not matter; elsewhere `\` is
+  still an ordinary character in a name. `favonius-daemon grant` also
+  accepts a drive-letter `--prefix` on any platform, so a Linux host can
+  issue a grant for a Windows daemon.
+
+### Changed
+
+- The Windows and macOS CI jobs run the end-to-end tests of `ahp-cli` and
+  `ahp-crypto`. They used to run unit tests only, which is why none of the
+  above showed.
+
 ## [0.3.0] — 2026-11-02
 
 ### Added

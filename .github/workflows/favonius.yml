@@ -233,6 +233,14 @@ jobs:
         # OS and not merely compiled for it.
         run: cargo test -p ahp-daemon
 
+      - name: Test ahp-cli and ahp-crypto
+        # The end-to-end tests: a daemon and a sender in one process, over
+        # loopback, through encryption, peer authentication, grants and
+        # per-stream ports. The unit tests above cannot see a path that is
+        # wrong only once it has crossed the wire — this is what found a
+        # Windows daemon refusing every drive-letter destination.
+        run: cargo test -p ahp-cli -p ahp-crypto
+
   # End-to-end loopback transfer against a real daemon binary. Linux-only
   # for now: the daemon builds and its receive loop is unit-tested on all
   # three platforms (see cross-platform above), but the full CLI-driven

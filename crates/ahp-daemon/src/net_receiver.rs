@@ -679,14 +679,53 @@ fn lexical_normalize(path: &std::path::Path) -> std::path::PathBuf {
     out
 }
 
+/// A Windows path without its verbatim prefix, drive letter in upper case:
+/// `\\?\C:\x` and `c:\x` both become `C:\x`, and `\\?\UNC\srv\share\x`
+/// becomes `\\srv\share\x`. Elsewhere, the path unchanged.
+///
+/// `canonicalize` returns the verbatim form on Windows, and a path a sender
+/// writes never has it. `Path::starts_with` compares the two prefixes as
+/// different, so a canonical root and a destination written `C:\...` never
+/// matched: every drive-letter destination was refused as outside the root.
+/// Only the prefix changes. A drive letter is case-insensitive on every
+/// Windows filesystem; the rest is still compared exactly, so a destination
+/// written with different case from the root is refused — the safe way to
+/// be wrong on a volume that can hold case-sensitive directories.
+fn without_verbatim_prefix(path: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        let mut components = path.components();
+        if let Some(Component::Prefix(prefix)) = components.next() {
+            let mut out = match prefix.kind() {
+                Prefix::VerbatimDisk(drive) | Prefix::Disk(drive) => {
+                    std::path::PathBuf::from(format!("{}:", drive.to_ascii_uppercase() as char))
+                }
+                Prefix::VerbatimUNC(server, share) => std::path::PathBuf::from(format!(
+                    r"\\{}\{}",
+                    server.to_string_lossy(),
+                    share.to_string_lossy()
+                )),
+                _ => return path.to_path_buf(),
+            };
+            out.extend(components);
+            return out;
+        }
+    }
+    path.to_path_buf()
+}
+
 /// Confine a sender-controlled destination path under `root` (S1).
 ///
-/// `root` must already be canonicalized (done once at startup). The joined
-/// path is lexically normalized and must stay under the root: absolute
-/// destinations outside the root and `..` escapes are rejected.
+/// `root` is canonicalized once at startup by the UDP receiver (the TCP
+/// fallback passes it as configured). The joined path is lexically
+/// normalized and must stay under the root: absolute destinations outside
+/// the root and `..` escapes are rejected. On Windows both sides are
+/// compared without a verbatim prefix (`without_verbatim_prefix`).
 pub(crate) fn confine_dest_path(root: &std::path::Path, dest: &str) -> Result<std::path::PathBuf, String> {
-    let joined = lexical_normalize(&root.join(dest));
-    if !joined.starts_with(root) {
+    let root = without_verbatim_prefix(root);
+    let joined = lexical_normalize(&without_verbatim_prefix(&root.join(dest)));
+    if !joined.starts_with(&root) {
         return Err(format!(
             "destination path {dest} escapes the configured --dest-root {}",
             root.display()
@@ -3930,6 +3969,38 @@ mod tests {
         ];
         assert!(confine_dest_path_any(&roots, "../../etc/passwd").is_err());
         assert!(confine_dest_path_any(&roots, "/etc/passwd").is_err());
+    }
+
+    /// The daemon canonicalizes its root to `\\?\C:\...`; a sender writes
+    /// `C:\...`. Before the prefix was dropped for the comparison, every
+    /// drive-letter destination was refused as outside the root.
+    #[cfg(windows)]
+    #[test]
+    fn a_canonical_windows_root_admits_drive_letter_destinations() {
+        let dir = std::env::temp_dir().join(format!("fav-confine-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.canonicalize().unwrap();
+        assert!(root.to_string_lossy().starts_with(r"\\?\"), "expected a verbatim root, got {}", root.display());
+        let plain = super::without_verbatim_prefix(&root);
+        let dest = plain.join("sub").join("f.bin");
+        let dest_s = dest.to_str().unwrap().to_string();
+
+        assert_eq!(confine_dest_path(&root, &dest_s).unwrap(), dest);
+        assert_eq!(confine_dest_path(&root, &dest_s.replace('\\', "/")).unwrap(), dest);
+        let lower = format!("{}{}", dest_s[..1].to_ascii_lowercase(), &dest_s[1..]);
+        assert_eq!(confine_dest_path(&root, &lower).unwrap(), dest);
+        assert!(confine_dest_path(&root, root.join("f.bin").to_str().unwrap()).is_ok());
+        assert!(confine_dest_path(&root, "sub/f.bin").is_ok());
+        // The TCP fallback passes the root as configured, not canonical.
+        assert_eq!(confine_dest_path(&plain, &dest_s).unwrap(), dest);
+
+        // Still confined.
+        let other_drive = if dest_s.starts_with('C') { r"D:\x\f.bin" } else { r"C:\x\f.bin" };
+        assert!(confine_dest_path(&root, other_drive).is_err());
+        assert!(confine_dest_path(&root, &format!(r"{}\..\..\f.bin", plain.display())).is_err());
+        assert!(confine_dest_path(&root, &format!(r"{}-evil\f.bin", plain.display())).is_err());
+        assert!(confine_dest_path(&root, r"\\server\share\f.bin").is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
