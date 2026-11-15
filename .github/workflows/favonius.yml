@@ -177,7 +177,7 @@ jobs:
         include:
           - os: windows-latest
             label: windows-x86_64
-          - os: macos-14
+          - os: macos-15
             label: macos-arm64
           # Intel macOS. This was macos-13, which GitHub retired on
           # 2025-12-04: the label stopped resolving to a runner, so the job

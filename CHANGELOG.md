@@ -33,6 +33,8 @@ in a minor release. See [Stability](#stability).
 - The Windows and macOS CI jobs run the end-to-end tests of `ahp-cli` and
   `ahp-crypto`. They used to run unit tests only, which is why none of the
   above showed.
+- The arm64 macOS CI and release jobs run on `macos-15`; GitHub no longer
+  provides `macos-14`.
 
 ## [0.3.0] — 2026-11-02
 

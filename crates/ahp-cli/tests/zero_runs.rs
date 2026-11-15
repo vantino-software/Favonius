@@ -30,11 +30,23 @@ impl Scratch {
         let dir = std::env::temp_dir()
             .join(format!("favonius-test-{tag}-{:016x}", rand::random::<u64>()));
         std::fs::create_dir_all(&dir).ok()?;
-        Some(Scratch(dir))
+        // The daemon canonicalizes its --dest-root and confines destinations
+        // against that form, so the test must name paths the same way. The
+        // temp directory is often an alias: /var/folders is /private/var on
+        // macOS, and Windows runners spell TEMP with an 8.3 short name.
+        Some(Scratch(canonical(&dir)?))
     }
     fn path(&self) -> &Path {
         &self.0
     }
+}
+
+/// `dir` with symlinks and short names resolved, without Windows's `\\?\`
+/// prefix, which a sender does not write.
+fn canonical(dir: &Path) -> Option<PathBuf> {
+    let c = dir.canonicalize().ok()?;
+    let s = c.to_str()?;
+    Some(PathBuf::from(s.strip_prefix(r"\\?\").unwrap_or(s)))
 }
 
 impl Drop for Scratch {
