@@ -734,6 +734,87 @@ pub(crate) fn confine_dest_path(root: &std::path::Path, dest: &str) -> Result<st
     Ok(joined)
 }
 
+/// A confinement root: the canonical directory the daemon writes under,
+/// and the spelling the operator configured, when that is a different path
+/// to the same directory.
+///
+/// The daemon canonicalizes `--dest-root` once at startup. A sender that
+/// names the root as the operator wrote it — `/var/x` where that is a
+/// symlink to `/private/var/x`, or a Windows 8.3 short name such as
+/// `C:\Users\RUNNER~1` — used to be refused as escaping it. Both spellings
+/// are admitted now, and the canonical one is what the daemon writes to.
+#[derive(Debug, Clone)]
+pub(crate) struct DestRoot {
+    canonical: std::path::PathBuf,
+    configured: Option<std::path::PathBuf>,
+}
+
+impl DestRoot {
+    /// `configured` as given on the command line; `canonical` is what
+    /// `canonicalize` made of it.
+    ///
+    /// The configured spelling is kept only when it is absolute after
+    /// `std::path::absolute` and holds no `..`: with a symlink in the path,
+    /// `a/link/..` lexically and on disk are different directories, and a
+    /// lexical rewrite of such a root could point somewhere else.
+    pub(crate) fn new(configured: &std::path::Path, canonical: std::path::PathBuf) -> Self {
+        let canonical = without_verbatim_prefix(&canonical);
+        let configured = std::path::absolute(configured)
+            .ok()
+            .filter(|p| !p.components().any(|c| matches!(c, std::path::Component::ParentDir)))
+            .map(|p| without_verbatim_prefix(&p))
+            .filter(|p| *p != canonical);
+        DestRoot { canonical, configured }
+    }
+
+    /// A root taken as written, with no second spelling.
+    #[cfg(test)]
+    pub(crate) fn exact(path: impl Into<std::path::PathBuf>) -> Self {
+        DestRoot { canonical: path.into(), configured: None }
+    }
+
+    pub(crate) fn canonical(&self) -> &std::path::Path {
+        &self.canonical
+    }
+}
+
+/// A destination after confinement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Confined {
+    /// Under the root's canonical form: the path the daemon opens.
+    pub(crate) path: std::path::PathBuf,
+    /// The same file under the root as the operator configured it, when the
+    /// root has a second spelling. A grant's prefix may be written either
+    /// way, so both are offered to it.
+    pub(crate) as_configured: Option<std::path::PathBuf>,
+}
+
+fn confine_under(root: &DestRoot, dest: &str) -> Result<Confined, String> {
+    // Swap the root of an already-confined path from one spelling to the
+    // other. `rest` is lexically normalized and has no `..`, so the two
+    // results name the same file.
+    let respell = |path: &std::path::Path, from: &std::path::Path, to: &std::path::Path| {
+        path.strip_prefix(from)
+            .map(|rest| to.join(rest))
+            .map_err(|_| format!("destination path {dest} escapes the configured --dest-root {}", from.display()))
+    };
+    if let Ok(path) = confine_dest_path(&root.canonical, dest) {
+        let as_configured = match &root.configured {
+            Some(configured) => Some(respell(&path, &root.canonical, configured)?),
+            None => None,
+        };
+        return Ok(Confined { path, as_configured });
+    }
+    match &root.configured {
+        Some(configured) => {
+            let spelled = confine_dest_path(configured, dest)?;
+            let path = respell(&spelled, configured, &root.canonical)?;
+            Ok(Confined { path, as_configured: Some(spelled) })
+        }
+        None => confine_dest_path(&root.canonical, dest).map(|path| Confined { path, as_configured: None }),
+    }
+}
+
 /// Confine against several roots: the destination must be under one of them.
 ///
 /// A machine legitimately exposes more than one tree — media on one volume,
@@ -744,20 +825,20 @@ pub(crate) fn confine_dest_path(root: &std::path::Path, dest: &str) -> Result<st
 /// The first root that accepts the path wins; the error names them all,
 /// because "escapes the configured root" is unhelpful when there are three
 /// and the reader cannot see which they missed.
-pub(crate) fn confine_dest_path_any(
-    roots: &[std::path::PathBuf],
-    dest: &str,
-) -> Result<std::path::PathBuf, String> {
+pub(crate) fn confine_dest_path_any(roots: &[DestRoot], dest: &str) -> Result<Confined, String> {
     for root in roots {
-        if let Ok(path) = confine_dest_path(root, dest) {
-            return Ok(path);
+        if let Ok(confined) = confine_under(root, dest) {
+            return Ok(confined);
         }
     }
     Err(format!(
         "destination path {dest} is under none of the configured --dest-root directories ({})",
         roots
             .iter()
-            .map(|r| r.display().to_string())
+            .map(|r| match &r.configured {
+                Some(c) => format!("{} = {}", c.display(), r.canonical.display()),
+                None => r.canonical.display().to_string(),
+            })
             .collect::<Vec<_>>()
             .join(", ")
     ))
@@ -1012,14 +1093,19 @@ pub async fn run_protocol_listener(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Canonicalize the confinement root once: it must exist, and the
     // canonical form is what lexical `starts_with` checks compare against.
-    let dest_roots: Vec<std::path::PathBuf> = if !dest_roots.is_empty() {
+    let dest_roots: Vec<DestRoot> = if !dest_roots.is_empty() {
         let mut canonical = Vec::with_capacity(dest_roots.len());
         for root in dest_roots {
             let canon = root.canonicalize().map_err(|e| {
                 format!("--dest-root {} cannot be canonicalized: {e}", root.display())
             })?;
-            tracing::info!(dest_root = %canon.display(), "destination confinement enabled");
-            canonical.push(canon);
+            let root = DestRoot::new(&root, canon);
+            tracing::info!(
+                dest_root = %root.canonical().display(),
+                configured_as = ?root.configured.as_ref().map(|c| c.display().to_string()),
+                "destination confinement enabled"
+            );
+            canonical.push(root);
         }
         canonical
     } else {
@@ -1449,7 +1535,7 @@ async fn run_transfer_slot(
     max_file_size: Option<u64>,
     ticket_key: std::sync::Arc<std::sync::Mutex<ahp_crypto::session_ticket::TicketKey>>,
     used_tickets: std::sync::Arc<std::sync::Mutex<ahp_crypto::session_ticket::UsedTicketCache>>,
-    dest_roots: std::sync::Arc<Vec<std::path::PathBuf>>,
+    dest_roots: std::sync::Arc<Vec<DestRoot>>,
     identity: std::sync::Arc<Option<ahp_crypto::signatures::SigningIdentity>>,
     peer_policy: std::sync::Arc<crate::peer_auth::PeerPolicy>,
     // Where to return the data socket. Returning it is what bounds the
@@ -2042,7 +2128,7 @@ async fn handle_transfer(
     max_file_size: Option<u64>,
     ticket_key: &std::sync::Arc<std::sync::Mutex<ahp_crypto::session_ticket::TicketKey>>,
     used_tickets: &std::sync::Arc<std::sync::Mutex<ahp_crypto::session_ticket::UsedTicketCache>>,
-    dest_roots: &[std::path::PathBuf],
+    dest_roots: &[DestRoot],
     identity: Option<&ahp_crypto::signatures::SigningIdentity>,
     peer_policy: &crate::peer_auth::PeerPolicy,
 ) -> Result<Option<(u64, SocketAddr)>, Box<dyn std::error::Error + Send + Sync>> {
@@ -2242,9 +2328,14 @@ async fn handle_transfer(
     // Without this the manifest makes the daemon create/truncate/write any
     // path it can reach. The rewritten (absolute, confined) path is used by
     // every consumer below — resume probes, merkle cache, output file.
+    let mut dest_as_configured: Option<String> = None;
     if !dest_roots.is_empty() {
         match confine_dest_path_any(dest_roots, &manifest.dest_path) {
-            Ok(confined) => manifest.dest_path = confined.to_string_lossy().into_owned(),
+            Ok(confined) => {
+                manifest.dest_path = confined.path.to_string_lossy().into_owned();
+                dest_as_configured =
+                    confined.as_configured.map(|p| p.to_string_lossy().into_owned());
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "rejecting transfer: destination escapes dest-root");
                 return Err(e.into());
@@ -2254,9 +2345,12 @@ async fn handle_transfer(
     // The grant narrows what --dest-root already allows; it never widens
     // it. Checked after confinement so the path compared is the rewritten
     // absolute one — comparing the sender's own string would let `..` do
-    // the work the prefix check is there to prevent.
+    // the work the prefix check is there to prevent. When the root has a
+    // second spelling, the grant may name either: both are the same file.
     if let Some(grant) = &permitted_paths {
-        if !grant.permits_path(&manifest.dest_path) {
+        let permitted = grant.permits_path(&manifest.dest_path)
+            || dest_as_configured.as_deref().is_some_and(|p| grant.permits_path(p));
+        if !permitted {
             tracing::warn!(
                 conn_id,
                 peer = %peer,
@@ -3871,7 +3965,7 @@ fn authenticate_ctrl(
 mod tests {
     use super::{
         apply_resume_bitmap, apply_zero_runs, zero_existing_ranges, authenticate_ctrl, build_merkle_resume, build_recv_streams,
-        confine_dest_path, confine_dest_path_any, content_fingerprint, decode_resume_bitmap,
+        confine_dest_path, confine_dest_path_any, content_fingerprint, DestRoot, decode_resume_bitmap,
         encode_merkle_cache,
         finalize_transfer, hex, lexical_normalize, local_chunk_index, make_header,
         merkle_cache_path, read_merkle_cache, recv_manifest_packet, resume_from_ticket,
@@ -3936,24 +4030,21 @@ mod tests {
         // useful ancestor.
         let media = std::path::PathBuf::from("/srv/media");
         let archive = std::path::PathBuf::from("/mnt/archive");
-        let roots = vec![media.clone(), archive.clone()];
+        let roots = vec![DestRoot::exact(media.clone()), DestRoot::exact(archive.clone())];
 
         assert_eq!(
-            confine_dest_path_any(&roots, "show/ep1.mkv").unwrap(),
+            confine_dest_path_any(&roots, "show/ep1.mkv").unwrap().path,
             media.join("show/ep1.mkv")
         );
         assert_eq!(
-            confine_dest_path_any(&roots, "/mnt/archive/2024/tape.tar").unwrap(),
+            confine_dest_path_any(&roots, "/mnt/archive/2024/tape.tar").unwrap().path,
             archive.join("2024/tape.tar")
         );
     }
 
     #[test]
     fn a_path_under_none_of_the_roots_is_refused_and_the_message_names_them() {
-        let roots = vec![
-            std::path::PathBuf::from("/srv/media"),
-            std::path::PathBuf::from("/mnt/archive"),
-        ];
+        let roots = vec![DestRoot::exact("/srv/media"), DestRoot::exact("/mnt/archive")];
         let err = confine_dest_path_any(&roots, "/etc/cron.d/pwn").unwrap_err();
         assert!(err.contains("/srv/media"), "{err}");
         assert!(err.contains("/mnt/archive"), "{err}");
@@ -3963,12 +4054,53 @@ mod tests {
     /// climb out of one root and into another's parent.
     #[test]
     fn an_escape_is_refused_by_every_root() {
-        let roots = vec![
-            std::path::PathBuf::from("/srv/media"),
-            std::path::PathBuf::from("/mnt/archive"),
-        ];
+        let roots = vec![DestRoot::exact("/srv/media"), DestRoot::exact("/mnt/archive")];
         assert!(confine_dest_path_any(&roots, "../../etc/passwd").is_err());
         assert!(confine_dest_path_any(&roots, "/etc/passwd").is_err());
+    }
+
+    /// A root configured through a symlink, as `/var` is on macOS: the
+    /// daemon writes under the canonical form, a sender may name either,
+    /// and neither spelling opens a way out.
+    #[cfg(unix)]
+    #[test]
+    fn a_root_configured_through_a_symlink_admits_both_spellings() {
+        let base = std::env::temp_dir().join(format!("fav-alias-{}", std::process::id()));
+        let real = base.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = base.join("link");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let canonical = link.canonicalize().unwrap();
+        let roots = vec![DestRoot::new(&link, canonical.clone())];
+
+        let via_link = confine_dest_path_any(&roots, link.join("d/f.bin").to_str().unwrap()).unwrap();
+        assert_eq!(
+            via_link,
+            super::Confined { path: canonical.join("d/f.bin"), as_configured: Some(link.join("d/f.bin")) }
+        );
+        let via_real = confine_dest_path_any(&roots, canonical.join("f.bin").to_str().unwrap()).unwrap();
+        assert_eq!(via_real.path, canonical.join("f.bin"));
+        assert_eq!(via_real.as_configured, Some(link.join("f.bin")));
+        assert_eq!(confine_dest_path_any(&roots, "rel.bin").unwrap().path, canonical.join("rel.bin"));
+
+        let outside = |p: std::path::PathBuf| confine_dest_path_any(&roots, p.to_str().unwrap()).is_err();
+        assert!(outside(link.join("../f.bin")));
+        assert!(outside(link.join("d/../../real-evil/f.bin")));
+        assert!(outside(base.join("link-evil/f.bin")));
+        assert!(outside(base.join("f.bin")));
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A root whose configured spelling is already canonical has no second
+    /// spelling, and one written with `..` gets none either: through a
+    /// symlink, the lexical and the real parent differ.
+    #[test]
+    fn a_second_spelling_is_kept_only_when_it_is_a_different_plain_path() {
+        let dir = std::env::temp_dir().canonicalize().unwrap();
+        assert!(DestRoot::new(&dir, dir.clone()).configured.is_none());
+        let dotted = dir.join("x").join("..");
+        assert!(DestRoot::new(&dotted, dir.clone()).configured.is_none());
     }
 
     /// The daemon canonicalizes its root to `\\?\C:\...`; a sender writes

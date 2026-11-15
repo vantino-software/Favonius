@@ -18,6 +18,15 @@ in a minor release. See [Stability](#stability).
   was not told and timed out. Confinement now compares both without the
   verbatim prefix and with the drive letter in upper case; the rest of the
   path is still compared exactly.
+- **A destination named through the root as configured was refused.** The
+  daemon confined destinations against the canonical form of `--dest-root`
+  only, so a root given through a symlink (`/var/...` on macOS, which is
+  `/private/var/...`) or a Windows 8.3 short name (`C:\Users\RUNNER~1`)
+  refused every sender that wrote it the way the operator did. Both
+  spellings are admitted now and the daemon writes under the canonical one;
+  a grant's prefix may use either. A configured root containing `..` keeps
+  no second spelling, since through a symlink its lexical and real parents
+  differ.
 - **The CLI refused a Windows destination path.** `host:port:C:\path` (or
   `C:/path`) is now accepted; `C:path`, relative to a drive's current
   directory on the daemon's machine, is still refused.
