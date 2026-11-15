@@ -195,8 +195,11 @@ async fn attempt_with_grant(
         ),
     )
     .await
-    .map(|r| r.is_ok())
-    .unwrap_or(false)
+    // Say why, on failure: a bare `false` turned every refusal and every
+    // broken data path into the same assertion message.
+    .map_err(|_| eprintln!("sender: timed out after 30 s"))
+    .and_then(|r| r.map_err(|e| eprintln!("sender: {e}")))
+    .is_ok()
 }
 
 /// What actually matters: did the bytes land?

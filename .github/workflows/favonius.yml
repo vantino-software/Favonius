@@ -239,7 +239,7 @@ jobs:
         # per-stream ports. The unit tests above cannot see a path that is
         # wrong only once it has crossed the wire — this is what found a
         # Windows daemon refusing every drive-letter destination.
-        run: cargo test -p ahp-cli -p ahp-crypto
+        run: cargo test -p ahp-cli -p ahp-crypto --no-fail-fast
 
   # End-to-end loopback transfer against a real daemon binary. Linux-only
   # for now: the daemon builds and its receive loop is unit-tested on all
