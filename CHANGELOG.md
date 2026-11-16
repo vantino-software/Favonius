@@ -13,6 +13,14 @@ in a minor release. See [Stability](#stability).
 
 ### Fixed
 
+- **No transfer from a macOS sender ever carried data.** The CLI connects
+  its data socket, and the macOS send backend then called `sendto` with an
+  address on every packet, which macOS refuses on a connected UDP socket
+  (`EISCONN`; Linux accepts it). Every data packet was dropped and logged
+  only at debug level. The handshake does not use that backend, so it
+  completed, and the transfer then stalled with no chunk acknowledged. A
+  connected socket is now written without an address, and a send failure
+  other than a full buffer is logged as a warning.
 - **A Windows daemon refused every drive-letter destination.** It
   canonicalizes its `--dest-root` to the verbatim form (`\\?\C:\...`), and
   a destination written `C:\...` never compared as being under it, so every

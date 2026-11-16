@@ -283,3 +283,46 @@ fn oversized_datagram_does_not_break_the_receive_loop() {
         "wrong length for the datagram after the oversized one"
     );
 }
+
+/// The sender as `ahp-cli` actually uses it: on a socket already
+/// `connect`ed to the destination.
+///
+/// The round trips above hand the backend an unconnected socket, and on that
+/// every backend works. The CLI connects its data socket first, and the
+/// macOS backend then called `sendto` with an address, which XNU refuses on
+/// a connected UDP socket with `EISCONN` (Linux accepts it). No data packet
+/// left the host, the handshake still completed because it does not go
+/// through this backend, and every macOS transfer stalled with no chunk
+/// acknowledged.
+#[test]
+fn a_connected_socket_still_sends_every_packet() {
+    let receiver = UdpSocket::bind("127.0.0.1:0").expect("bind receiver");
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set recv timeout");
+    let recv_addr: SocketAddr = receiver.local_addr().expect("recv addr");
+
+    let sender = UdpSocket::bind("127.0.0.1:0").expect("bind sender");
+    sender.connect(recv_addr).expect("connect sender");
+
+    let mut batch = create_best_sender(raw_socket_of(&sender), recv_addr, NUM_PACKETS, SEGMENT_SIZE);
+    for idx in 0..NUM_PACKETS {
+        batch.stage(&make_payload(idx)).expect("stage");
+    }
+    let sent = batch.flush().expect("flush");
+    assert_eq!(sent, NUM_PACKETS, "{} sent {sent} of {NUM_PACKETS} on a connected socket", batch.name());
+
+    let mut got = vec![false; NUM_PACKETS];
+    let mut buf = vec![0u8; DEFAULT_MAX_PACKET];
+    let mut bytes = 0usize;
+    while let Ok(n) = receiver.recv(&mut buf) {
+        bytes += n;
+        let idx = (buf[0] as usize) | ((buf[1] as usize) << 8);
+        assert_eq!(buf[..n], make_payload(idx)[..], "packet {idx} changed in transit");
+        got[idx] = true;
+        if got.iter().all(|&g| g) {
+            break;
+        }
+    }
+    assert!(got.iter().all(|&g| g), "missing packets: {got:?} ({bytes} bytes arrived)");
+}

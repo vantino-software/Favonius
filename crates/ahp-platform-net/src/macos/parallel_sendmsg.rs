@@ -39,6 +39,22 @@ struct QueuedPacket {
     dest: libc::sockaddr_in,
 }
 
+/// Whether `fd` is a connected socket.
+///
+/// The sender hands this backend a socket it has already `connect`ed to the
+/// data port. On Linux, `sendto` with an address on a connected UDP socket
+/// is accepted and the address ignored; on macOS (XNU's `udp_output`, as on
+/// the BSDs) it fails with `EISCONN`. Every data packet was refused that
+/// way: the handshake, which goes through tokio's `send`, completed, and
+/// the peer then saw no data at all. A connected socket must be written
+/// with no address.
+fn is_connected(fd: RawFd) -> bool {
+    let mut peer: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    let ret = unsafe { libc::getpeername(fd, &mut peer as *mut _ as *mut libc::sockaddr, &mut len) };
+    ret == 0
+}
+
 /// A contiguous run of packets handed to one worker, plus the channel it
 /// uses to report how many actually went out.
 struct WorkChunk {
@@ -72,11 +88,13 @@ impl ParallelSendmsgBatchSender {
         // The channel holds at most one chunk: flush waits for every
         // worker's reply before returning, so a worker is always idle when
         // the next flush dispatches.
+        let connected = is_connected(socket_fd);
+        tracing::debug!(connected, "macos/parallel-sendmsg: socket state");
         for _ in 0..NUM_WORKERS {
             let (tx, rx) = crossbeam_channel::bounded::<WorkChunk>(1);
             let fd = socket_fd;
             let handle = std::thread::spawn(move || {
-                worker_loop(fd, rx);
+                worker_loop(fd, connected, rx);
             });
             senders.push(tx);
             workers.push(handle);
@@ -92,27 +110,38 @@ impl ParallelSendmsgBatchSender {
     }
 }
 
-fn worker_loop(fd: RawFd, rx: crossbeam_channel::Receiver<WorkChunk>) {
+fn worker_loop(fd: RawFd, connected: bool, rx: crossbeam_channel::Receiver<WorkChunk>) {
     while let Ok(chunk) = rx.recv() {
         let mut sent = 0usize;
         for pkt in &chunk.packets {
             let ret = unsafe {
-                libc::sendto(
-                    fd,
-                    pkt.data.as_ptr() as *const libc::c_void,
-                    pkt.data.len(),
-                    0,
-                    &pkt.dest as *const _ as *const libc::sockaddr,
-                    std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
-                )
+                if connected {
+                    libc::send(fd, pkt.data.as_ptr() as *const libc::c_void, pkt.data.len(), 0)
+                } else {
+                    libc::sendto(
+                        fd,
+                        pkt.data.as_ptr() as *const libc::c_void,
+                        pkt.data.len(),
+                        0,
+                        &pkt.dest as *const _ as *const libc::sockaddr,
+                        std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                    )
+                }
             };
             if ret >= 0 {
                 sent += 1;
             } else {
-                // EAGAIN/WouldBlock included: count honestly so the
-                // congestion controller treats the packet as lost.
+                // Count honestly so the congestion controller treats the
+                // packet as lost. A full buffer is routine and stays at
+                // debug; anything else is a fault in the path and must be
+                // visible, or a backend that sends nothing looks like a
+                // peer that never answers.
                 let err = std::io::Error::last_os_error();
-                tracing::debug!(error = %err, "sendto failed; packet dropped");
+                if err.kind() == std::io::ErrorKind::WouldBlock || err.raw_os_error() == Some(libc::ENOBUFS) {
+                    tracing::debug!(error = %err, "send failed; packet dropped");
+                } else {
+                    tracing::warn!(error = %err, "send failed; packet dropped");
+                }
             }
         }
         // If the reply fails the sender is being torn down; nothing to do.
