@@ -37,7 +37,7 @@ jobs:
           # Three real failures once sat behind that for fourteen hours.
           # `macos-latest` would move under us the same way.
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: macos-15
           - target: x86_64-apple-darwin
             os: macos-15-intel     # the last x86_64 image; retires autumn 2027
           - target: x86_64-pc-windows-msvc

@@ -195,10 +195,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .map_err(|e| format!("--source: {e}"))?;
         let destination = ahp_crypto::signatures::parse_identity_pin(destination)
             .map_err(|e| format!("--destination: {e}"))?;
-        if !std::path::Path::new(prefix).is_absolute() {
+        if !ahp_crypto::grant::prefix_is_absolute(prefix) {
             // A relative prefix would be compared against the absolute path
             // the daemon resolved, and would never match — a grant that
             // silently permits nothing is worse than one that is refused.
+            // Absolute on either platform: this host may be Linux issuing a
+            // grant for a Windows daemon's `D:\...`.
             return Err(format!("--prefix {prefix} must be an absolute path").into());
         }
         let now = ahp_crypto::grant::now_unix();

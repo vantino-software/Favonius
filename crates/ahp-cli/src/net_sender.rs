@@ -535,6 +535,15 @@ pub fn parse_remote_dest(dest: &str) -> Option<(SocketAddr, String)> {
     parse_remote_dest_detailed(dest).ok()
 }
 
+/// `C:\x` or `C:/x`: absolute on Windows, which is where the daemon will
+/// read it. `C:x` names a path relative to that drive's current directory
+/// on the daemon's machine, which the sender cannot know, so it is refused
+/// like any other relative path.
+fn is_windows_absolute(path: &str) -> bool {
+    let b = path.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
+}
+
 /// As `parse_remote_dest`, but says why it failed.
 pub fn parse_remote_dest_detailed(dest: &str) -> Result<(SocketAddr, String), String> {
     // Bracketed IPv6 literal: [addr]:port:/path
@@ -561,8 +570,10 @@ pub fn parse_remote_dest_detailed(dest: &str) -> Result<(SocketAddr, String), St
     let port_str = &rest[..colon];
     let path = &rest[colon + 1..];
 
-    if !path.starts_with('/') {
-        return Err(format!("destination path must be absolute, got '{path}'"));
+    if !path.starts_with('/') && !is_windows_absolute(path) {
+        return Err(format!(
+            "destination path must be absolute (/path, or C:\\path for a Windows daemon), got '{path}'"
+        ));
     }
     let port: u16 = port_str
         .parse()
@@ -4751,6 +4762,19 @@ mod tests {
         } else {
             assert!(r.unwrap_err().contains("IPv6"));
         }
+    }
+
+    /// A Windows daemon reads its destinations as Windows paths. The parse
+    /// is the same on every platform: what matters is where the path is read.
+    #[test]
+    fn a_windows_daemon_takes_a_drive_letter_path() {
+        let (_, path) = pd(r"192.168.1.5:7801:C:\data\f.bin").unwrap();
+        assert_eq!(path, r"C:\data\f.bin");
+        let (_, path) = pd("192.168.1.5:7801:d:/data/f.bin").unwrap();
+        assert_eq!(path, "d:/data/f.bin");
+        // Relative to whatever that drive's current directory is on the
+        // daemon's machine: refused like any relative path.
+        assert!(pd("192.168.1.5:7801:C:data").unwrap_err().contains("absolute"));
     }
 
     #[test]

@@ -177,7 +177,7 @@ jobs:
         include:
           - os: windows-latest
             label: windows-x86_64
-          - os: macos-14
+          - os: macos-15
             label: macos-arm64
           # Intel macOS. This was macos-13, which GitHub retired on
           # 2025-12-04: the label stopped resolving to a runner, so the job
@@ -232,6 +232,14 @@ jobs:
         # over a loopback UDP pair, so the receive loop is exercised on this
         # OS and not merely compiled for it.
         run: cargo test -p ahp-daemon
+
+      - name: Test ahp-cli and ahp-crypto
+        # The end-to-end tests: a daemon and a sender in one process, over
+        # loopback, through encryption, peer authentication, grants and
+        # per-stream ports. The unit tests above cannot see a path that is
+        # wrong only once it has crossed the wire — this is what found a
+        # Windows daemon refusing every drive-letter destination.
+        run: cargo test -p ahp-cli -p ahp-crypto --no-fail-fast
 
   # End-to-end loopback transfer against a real daemon binary. Linux-only
   # for now: the daemon builds and its receive loop is unit-tested on all

@@ -89,18 +89,57 @@ impl VerifiedGrant {
     /// for a prefix of `/srv/incoming`, so a prefix that does not already
     /// end in a separator is compared as though it did. Equality with the
     /// prefix itself is allowed: a grant for a file names that file.
+    ///
+    /// Paths are compared as the platform that verifies the grant reads
+    /// them, which is the daemon's. On Windows both slashes separate and a
+    /// drive letter's case does not matter (`windows_form`). Elsewhere `\`
+    /// is an ordinary character in a name, and reading it as a separator
+    /// would let `/srv/incoming\x` — a file beside the prefix, not under
+    /// it — pass.
     pub fn permits_path(&self, path: &str) -> bool {
-        let prefix = &self.0.path_prefix;
-        if prefix.is_empty() {
+        if self.0.path_prefix.is_empty() {
             return false;
         }
+        let (prefix, path, sep) = if cfg!(windows) {
+            (windows_form(&self.0.path_prefix), windows_form(path), '\\')
+        } else {
+            (self.0.path_prefix.clone(), path.to_string(), '/')
+        };
         if path == prefix {
             return true;
         }
-        let with_sep =
-            if prefix.ends_with('/') { prefix.clone() } else { format!("{prefix}/") };
+        let with_sep = if prefix.ends_with(sep) { prefix } else { format!("{prefix}{sep}") };
         path.starts_with(&with_sep)
     }
+}
+
+/// A Windows path in one spelling: `\` for every separator, no `\\?\`
+/// verbatim prefix before a drive, the drive letter in upper case. Case
+/// beyond the drive letter is kept: a mismatch refuses, which is the safe
+/// direction.
+fn windows_form(path: &str) -> String {
+    let mut s = path.replace('/', "\\");
+    if s.starts_with(r"\\?\") && is_windows_absolute(&s[4..]) {
+        s.drain(..4);
+    }
+    if is_windows_absolute(&s) {
+        s[..1].make_ascii_uppercase();
+    }
+    s
+}
+
+/// `C:\x` or `C:/x`.
+fn is_windows_absolute(path: &str) -> bool {
+    let b = path.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
+}
+
+/// Whether `prefix` can be a grant's path prefix: absolute, on whichever
+/// platform the destination daemon runs. The issuer may be a different
+/// platform from the daemon — a Linux control plane granting a write to a
+/// Windows machine — so a drive-letter path counts as absolute everywhere.
+pub fn prefix_is_absolute(prefix: &str) -> bool {
+    prefix.starts_with('/') || is_windows_absolute(prefix)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -512,6 +551,41 @@ mod tests {
         let v = verified("/srv/incoming");
         assert!(!v.permits_path("/srv/incoming-evil/a.bin"));
         assert!(!v.permits_path("/srv/incomingevil"));
+    }
+
+    /// On Linux a backslash belongs to the name: `/srv/incoming\x` is a
+    /// file in `/srv`, beside the prefix.
+    #[cfg(unix)]
+    #[test]
+    fn a_backslash_is_not_a_separator_on_unix() {
+        let v = verified("/srv/incoming");
+        assert!(!v.permits_path("/srv/incoming\\x.bin"));
+    }
+
+    /// A Windows daemon compares as Windows does: either slash, any case of
+    /// drive letter, with or without the verbatim prefix its own
+    /// canonicalization produces.
+    #[cfg(windows)]
+    #[test]
+    fn a_windows_path_under_the_prefix_is_permitted() {
+        let v = verified(r"C:\data\incoming");
+        assert!(v.permits_path(r"C:\data\incoming\a.bin"));
+        assert!(v.permits_path("c:/data/incoming/deep/a.bin"));
+        assert!(v.permits_path(r"\\?\C:\data\incoming\a.bin"));
+        assert!(v.permits_path(r"C:\data\incoming"));
+        assert!(!v.permits_path(r"C:\data\incoming-evil\a.bin"));
+        assert!(!v.permits_path(r"D:\data\incoming\a.bin"));
+        assert!(!v.permits_path(r"C:\data\other\a.bin"));
+        assert!(!v.permits_path(r"C:\Data\Incoming\a.bin"), "case beyond the drive letter is kept");
+    }
+
+    #[test]
+    fn a_grant_prefix_may_be_absolute_on_either_platform() {
+        assert!(prefix_is_absolute("/srv/incoming"));
+        assert!(prefix_is_absolute(r"D:\Backups"));
+        assert!(prefix_is_absolute("D:/Backups"));
+        assert!(!prefix_is_absolute("relative/path"));
+        assert!(!prefix_is_absolute("D:Backups"));
     }
 
     #[test]

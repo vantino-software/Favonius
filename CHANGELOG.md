@@ -9,6 +9,52 @@ in a minor release. See [Stability](#stability).
 
 ## Unreleased
 
+## [0.3.1] — 2026-11-15
+
+### Fixed
+
+- **No transfer from a macOS sender ever carried data.** The CLI connects
+  its data socket, and the macOS send backend then called `sendto` with an
+  address on every packet, which macOS refuses on a connected UDP socket
+  (`EISCONN`; Linux accepts it). Every data packet was dropped and logged
+  only at debug level. The handshake does not use that backend, so it
+  completed, and the transfer then stalled with no chunk acknowledged. A
+  connected socket is now written without an address, and a send failure
+  other than a full buffer is logged as a warning.
+- **A Windows daemon refused every drive-letter destination.** It
+  canonicalizes its `--dest-root` to the verbatim form (`\\?\C:\...`), and
+  a destination written `C:\...` never compared as being under it, so every
+  transfer to a Windows path was rejected as escaping the root. The sender
+  was not told and timed out. Confinement now compares both without the
+  verbatim prefix and with the drive letter in upper case; the rest of the
+  path is still compared exactly.
+- **A destination named through the root as configured was refused.** The
+  daemon confined destinations against the canonical form of `--dest-root`
+  only, so a root given through a symlink (`/var/...` on macOS, which is
+  `/private/var/...`) or a Windows 8.3 short name (`C:\Users\RUNNER~1`)
+  refused every sender that wrote it the way the operator did. Both
+  spellings are admitted now and the daemon writes under the canonical one;
+  a grant's prefix may use either. A configured root containing `..` keeps
+  no second spelling, since through a symlink its lexical and real parents
+  differ.
+- **The CLI refused a Windows destination path.** `host:port:C:\path` (or
+  `C:/path`) is now accepted; `C:path`, relative to a drive's current
+  directory on the daemon's machine, is still refused.
+- **A grant's path prefix did not match on a Windows daemon.** The check
+  compared strings with `/` as the only separator. On Windows both slashes
+  now separate and a drive letter's case does not matter; elsewhere `\` is
+  still an ordinary character in a name. `favonius-daemon grant` also
+  accepts a drive-letter `--prefix` on any platform, so a Linux host can
+  issue a grant for a Windows daemon.
+
+### Changed
+
+- The Windows and macOS CI jobs run the end-to-end tests of `ahp-cli` and
+  `ahp-crypto`. They used to run unit tests only, which is why none of the
+  above showed.
+- The arm64 macOS CI and release jobs run on `macos-15`; GitHub no longer
+  provides `macos-14`.
+
 ## [0.3.0] — 2026-11-02
 
 ### Added
@@ -344,6 +390,7 @@ possible in a tool that writes files to a path a peer chose.
 - **Rust.** MSRV is 1.87, verified in CI. Raising it is a minor-version
   change.
 
+[0.3.1]: https://github.com/vantino-software/Favonius/releases/tag/v0.3.1
 [0.3.0]: https://github.com/vantino-software/Favonius/releases/tag/v0.3.0
 [0.2.0]: https://github.com/vantino-software/Favonius/releases/tag/v0.2.0
 [0.1.0]: https://github.com/vantino-software/Favonius/releases/tag/v0.1.0

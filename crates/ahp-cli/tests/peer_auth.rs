@@ -35,11 +35,23 @@ impl Scratch {
         let dir = std::env::temp_dir()
             .join(format!("favonius-test-{tag}-{:016x}", rand::random::<u64>()));
         std::fs::create_dir_all(&dir).ok()?;
-        Some(Scratch(dir))
+        // The daemon canonicalizes its --dest-root and confines destinations
+        // against that form, so the test must name paths the same way. The
+        // temp directory is often an alias: /var/folders is /private/var on
+        // macOS, and Windows runners spell TEMP with an 8.3 short name.
+        Some(Scratch(canonical(&dir)?))
     }
     fn path(&self) -> &Path {
         &self.0
     }
+}
+
+/// `dir` with symlinks and short names resolved, without Windows's `\\?\`
+/// prefix, which a sender does not write.
+fn canonical(dir: &Path) -> Option<PathBuf> {
+    let c = dir.canonicalize().ok()?;
+    let s = c.to_str()?;
+    Some(PathBuf::from(s.strip_prefix(r"\\?\").unwrap_or(s)))
 }
 
 impl Drop for Scratch {
@@ -102,12 +114,22 @@ async fn start_daemon(policy: PeerPolicy) -> Option<Daemon> {
 }
 
 async fn start_daemon_inner(policy: PeerPolicy, identity: SigningIdentity) -> Option<Daemon> {
+    let dir = Scratch::new("peer-auth")?;
+    let dest_root = dir.path().to_path_buf();
+    start_daemon_at(policy, identity, dir, dest_root).await
+}
+
+/// Start a daemon whose `--dest-root` is `dest_root`, which the test names
+/// destinations under exactly as it is written here.
+async fn start_daemon_at(
+    policy: PeerPolicy,
+    identity: SigningIdentity,
+    dir: Scratch,
+    dest_root: PathBuf,
+) -> Option<Daemon> {
     let base = free_port_run(2)?;
     let control: SocketAddr = format!("127.0.0.1:{base}").parse().unwrap();
     let data: SocketAddr = format!("127.0.0.1:{}", base + 1).parse().unwrap();
-
-    let dir = Scratch::new("peer-auth")?;
-    let dest_root = dir.path().to_path_buf();
     let root = dest_root.clone();
 
     let server_key = identity.public_bytes();
@@ -173,8 +195,11 @@ async fn attempt_with_grant(
         ),
     )
     .await
-    .map(|r| r.is_ok())
-    .unwrap_or(false)
+    // Say why, on failure: a bare `false` turned every refusal and every
+    // broken data path into the same assertion message.
+    .map_err(|_| eprintln!("sender: timed out after 30 s"))
+    .and_then(|r| r.map_err(|e| eprintln!("sender: {e}")))
+    .is_ok()
 }
 
 /// What actually matters: did the bytes land?
@@ -327,6 +352,38 @@ async fn a_valid_grant_transfers() {
         "a valid grant was refused"
     );
     assert!(landed(&d, "ok.bin"));
+}
+
+/// A root configured through a symlink — what `/var` is on macOS. The
+/// daemon canonicalizes it at startup; a sender, and the grant, still name
+/// it the way the operator wrote it, and the file lands in the real
+/// directory.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_root_named_through_a_symlink_takes_its_own_spelling() {
+    let anchor = SigningIdentity::generate();
+    let client = SigningIdentity::generate();
+    let anchor_pub = anchor.public_bytes();
+    let identity = SigningIdentity::generate();
+    let own = identity.public_bytes();
+    let policy = PeerPolicy::new([], true).with_trust_anchors([anchor_pub], true, Some(own));
+
+    let dir = Scratch::new("peer-auth-link").expect("scratch");
+    let real = dir.path().join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let Some(d) = start_daemon_at(policy, identity, dir, link.clone()).await else {
+        eprintln!("skipped: no free ports");
+        return;
+    };
+
+    let g = grant_bytes(&anchor, client.public_bytes(), d.server_key, link.to_str().unwrap(), in_five_minutes());
+    assert!(
+        attempt_with_grant(&d, "via-link.bin", Some(&client), Some(&g), true).await,
+        "a destination under the configured spelling was refused"
+    );
+    assert!(real.join("via-link.bin").exists());
 }
 
 #[tokio::test]
